@@ -8,6 +8,32 @@ All notable changes to this project. Format follows
 
 ### Added
 
+**Kicker draft ranking**
+- New `kickers.py`: a standalone kicker ranking, deliberately not run through
+  `model.project()` (see its module docstring for why the O-line/pace/schedule/
+  separation/td-luck machinery doesn't have a kicker analogue worth forcing).
+  `kicker_ppg` is recency-weighted fantasy points per game across the same
+  5-season lookback the skill-position baseline uses, scored under new
+  distance-banded `Scoring` fields (`fg_made_0_39`/`fg_made_40_49`/
+  `fg_made_50_plus`, `fg_missed`, `pat_made`/`pat_missed`, optional
+  `fg_made_60_bonus`) defaulting to ESPN's public default scoring template.
+- Team-offense context is reused, not re-derived: `context_tier` quintile-bands
+  `features.team_drive_efficiency`'s `pct_fg` (how often a team's drives stall
+  into a field goal try — the "which team's situation makes a kicker draftable"
+  signal) across the board, alongside `team_pace_and_split`'s `plays_per_game`/
+  `off_epa`. Informational only, same "not folded into the score" convention as
+  `drive_efficiency` in `team_context`.
+- `best_available(position="K")` returns the kicker board (sorted by
+  `kicker_ppg`, ignores `sort_by`); `player_report` and `compare_players` now
+  fall back to matching a kicker by name when no skill-position player matches.
+  Not wired into `who_should_i_pick`, `draft_backtest`, or `mock_draft` — those
+  still treat K/DST as outside the model.
+- Rationale: under most leagues' real distance-banded scoring, a kicker trusted
+  from 50+ on a good offense scores like a low-end WR2/high-end WR3 across a
+  season, not the flat "3 points a field goal" replacement-level afterthought a
+  standard scoring mental model assumes — worth more than "take one last."
+  See [methodology.md#kickers](docs/methodology.md#kickers).
+
 **Team drive efficiency and red zone identity**
 - New `features.team_drive_efficiency` (share of a team's drives ending in a
   touchdown/field goal/punt) and `features.redzone_identity_shift` (a team's neutral

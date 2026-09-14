@@ -261,6 +261,40 @@ Unmatched names are excluded rather than counted as zeros. Without that, Joshua 
 showed a 0.00 return across four seasons purely because FantasyPros writes "Josh" — a
 fabricated bust sitting in the middle of the results.
 
+## Kickers
+
+Not run through the projection pipeline above — see `kickers.py`'s module
+docstring for why the O-line/pace/schedule/separation/td-luck machinery doesn't
+have a kicker analogue worth forcing through `FANTASY_POSITIONS`-shaped code.
+Instead: recency-weighted fantasy points per game (`kicker_ppg`, same 5-season
+lookback and weighting the skill-position baseline uses) under the league's own
+distance-banded scoring (`Scoring.fg_made_0_39` / `fg_made_40_49` /
+`fg_made_50_plus`, defaulting to ESPN's public default template — three bands, a
+flat penalty for any miss or block, PAT made/missed), plus team-offense context
+*reused* rather than re-derived: `features.team_drive_efficiency`'s `pct_fg` (how
+often this team's drives stall into a field goal try at all — the "average end
+position" signal) and `features.team_pace_and_split`'s `plays_per_game`/`off_epa`
+(offensive volume and efficiency). Both are informational only, surfaced as
+`context_tier` (quintile-banded `pct_fg` across the board), same "not folded into
+the score" convention `team_context.drive_efficiency` uses for skill positions —
+a kicker's own points already reflect how often his offense fed him chances,
+so blending the team signal in again would double-count it.
+
+Why this earns real draft attention instead of "take one last": under most
+leagues' actual distance-banded scoring, a kicker trusted from 50+ on a good
+offense scores like a low-end WR2/high-end WR3, not the flat "3 points a field
+goal" replacement-level afterthought a standard mental model assumes — 2025's top
+kickers, recomputed under ESPN's default bands, averaged roughly 9-11 points per
+game across a full season.
+
+Exposed through `best_available(position="K")`, `player_report`, and
+`compare_players` (all fall back to the kicker board when a name doesn't match a
+skill-position player) rather than dedicated tools, to keep the surface small.
+Deliberately NOT wired into `who_should_i_pick`, `draft_backtest`, or
+`mock_draft` — those still treat K/DST as outside the model, same as before this
+feature. Team is each kicker's most-recently-played team from box scores, not
+reconciled against the current depth chart the way skill positions are.
+
 ## Known limitations
 
 - **Second-year players** sit awkwardly: enough history to leave the rookie curve, not
@@ -271,4 +305,6 @@ fabricated bust sitting in the middle of the results.
 - **Man/zone coverage splits** are unavailable. `coverage_trend_weight` proxies for
   the trend qualitatively (TPRR/aDOT for WR/TE, target_share for RB) but defaults to
   0 and isn't backtested — see "Coverage-scheme trend" above.
-- **Kickers and defenses** aren't modelled. Take them last anyway.
+- **Kickers** get a standalone ranking (see "Kickers" above) but aren't in the VOR/
+  opportunity-cost draft model or any backtest tool. **Defenses** aren't modelled at
+  all. Take DST last; kickers can reasonably go earlier than "last" now, per above.

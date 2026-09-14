@@ -74,6 +74,13 @@ your roster, and each player's odds of surviving to your next pick.
 Next best on the board. `sort_by`: `draft_score` (balanced), `vor`, `consistency`,
 `proj_points`, or `value` (biggest ADP-to-model gap). Filter with `position`.
 
+`position="K"` returns the kicker ranking instead of the skill-position board —
+kickers aren't run through the same model (see
+[methodology.md#kickers](methodology.md#kickers)), so this ignores `sort_by` and
+always orders by `kicker_ppg` (recency-weighted fantasy points per game under the
+league's distance-banded scoring). Also not draft-state aware: a kicker doesn't
+drop off the list once picked, since `sync_draft`/`record_pick` don't track K.
+
 ### `sync_draft`
 Pull the live board.
 
@@ -99,8 +106,15 @@ components, separation, draft capital for rookies. Includes red zone role
 (`rz_baseline_rate`) and the resulting `m_td_luck` multiplier — surfaced in the plain-
 language `summary` as "touchdown regression" whenever it moves the projection.
 
+Also matches kickers by name, falling back to a differently-shaped report — FG
+splits by distance, PAT, and team offense context instead of the skill-position
+multipliers above — since kickers aren't run through the same model. See
+[methodology.md#kickers](methodology.md#kickers).
+
 ### `compare_players`
-Two to four players head to head, with a verdict.
+Two to four players head to head, with a verdict. Also matches kickers by name,
+reported separately from skill-position players (`kicker_ppg` isn't comparable to
+`draft_score`) — mainly useful for comparing two kickers head to head.
 
 ### `rookie_report`
 This year's class, projected from draft capital and landing spot. Widest error bars on

@@ -20,6 +20,7 @@ except ImportError:  # mcp SDK 1.x
 from . import adp as adp_mod
 from . import board as bd
 from . import features, model, sources
+from . import kickers as kk_mod
 from .config import (
     CURRENT_SEASON,
     DATA_DIR,
@@ -93,6 +94,24 @@ def _build_board(force: bool = False) -> pd.DataFrame:
     proj.to_parquet(path, index=False)
     _BOARDS[key] = proj
     return proj
+
+
+_KICKER_BOARDS: dict[str, pd.DataFrame] = {}
+
+
+def _build_kicker_board(force: bool = False) -> pd.DataFrame:
+    """Kickers get their own small cache, keyed the same way the skill board is --
+    not run through _build_board/model.project at all, see kickers.py's docstring
+    for why. No ADP/draft-state involved, so this is much cheaper than the skill
+    board and doesn't need a parquet round trip.
+    """
+    league, _ = _settings()
+    key = league.cache_key()
+    if not force and key in _KICKER_BOARDS:
+        return _KICKER_BOARDS[key]
+    b = kk_mod.kicker_board(league)
+    _KICKER_BOARDS[key] = b
+    return b
 
 
 def _state() -> bd.DraftState:
@@ -234,11 +253,14 @@ def refresh_data(force_download: bool = False) -> str:
     sources.clear_memory_cache()
     features.clear_derived_cache()
     _BOARDS.clear()
+    _KICKER_BOARDS.clear()
     b = _build_board(force=True)
+    kb = _build_kicker_board(force=True)
     league, _ = _settings()
     return json.dumps({
         "players_modelled": len(b),
         "by_position": b["position"].value_counts().to_dict(),
+        "kickers_modelled": len(kb),
         "seasons": sorted(int(s) for s in sources.weekly_stats()["season"].unique()),
         "datasets_cached": sources.cache_status(),
         "top_10": _rows(b, ["name", "position", "team", "proj_points", "consistency", "adp"], 10),
@@ -252,7 +274,21 @@ def best_available(position: str | None = None, limit: int = 15,
 
     sort_by: draft_score (balanced), vor (raw value), consistency (floor),
     proj_points, or value (biggest gap between ADP and model rank).
+
+    position="K" returns the kicker ranking instead -- kickers aren't run through
+    the same model (see kickers.py), so sort_by there is fixed to kicker_ppg
+    (recency-weighted fantasy points per game under the league's distance-banded
+    scoring) rather than any of the skill-position sort keys above. Not
+    draft-state aware like the rest of this tool -- a kicker doesn't disappear
+    from the list once drafted, since sync_draft/record_pick don't track K picks.
     """
+    if position and position.upper() == "K":
+        kb = _build_kicker_board()
+        cols = ["name", "team", "kicker_rank", "kicker_ppg", "fg_pct", "fg_made", "fg_att",
+                "long_range_share_pct", "fg_long", "context_tier", "pct_fg", "pct_td", "off_epa"]
+        return json.dumps({"sorted_by": "kicker_ppg",
+                           "kickers": _rows(kb, [c for c in cols if c in kb.columns], limit)}, indent=2)
+
     b = _mark_drafted(_build_board(), _state())
     avail = b[~b["drafted"]]
     if position:
@@ -903,11 +939,28 @@ def prewarm(verbose: bool = True) -> str:
 
 @mcp.tool()
 def player_report(player_name: str) -> str:
-    """Full breakdown of one player: production, role, environment, injury, consistency."""
+    """Full breakdown of one player: production, role, environment, injury, consistency.
+
+    Also matches kickers (position K), returned with a different, smaller shape --
+    distance-banded field goal splits and team offense context instead of the
+    skill-position environment multipliers, since kickers aren't run through the
+    same model (see kickers.py).
+    """
     b = _build_board()
     r = bd.match_player(player_name, b)
     if r is None:
-        return json.dumps({"error": f"no match for '{player_name}'"})
+        kb = _build_kicker_board()
+        kr = bd.match_player(player_name, kb) if not kb.empty else None
+        if kr is None:
+            return json.dumps({"error": f"no match for '{player_name}'"})
+        fields = ["name", "position", "team", "kicker_rank", "kicker_ppg",
+                  "fg_att", "fg_made", "fg_pct", "fg_missed", "fg_blocked",
+                  "fg_made_u40", "fg_made_40_49", "fg_made_50p", "fg_long",
+                  "long_range_share_pct", "pat_made", "pat_att",
+                  "context_tier", "pct_fg", "pct_td", "pct_punt",
+                  "plays_per_game", "off_epa", "last_season", "games_last"]
+        return json.dumps(_rows(pd.DataFrame([kr]), [f for f in fields if f in kr.index], 1)[0],
+                          indent=2)
     fields = ["name", "position", "team", "age", "overall_rank", "pos_rank", "adp", "adp_delta",
               "proj_points", "adj_ppg", "baseline_ppg", "exp_games",
               "consistency", "startable_rate", "spike_rate", "floor", "ceiling", "fp_cv",
@@ -927,23 +980,41 @@ def player_report(player_name: str) -> str:
 
 @mcp.tool()
 def compare_players(names: str) -> str:
-    """Compare 2-4 players head to head. Pass a comma-separated list."""
+    """Compare 2-4 players head to head. Pass a comma-separated list.
+
+    Also matches kickers by name, reported separately from skill-position players
+    (different shape, different scale -- kicker_ppg isn't comparable to
+    draft_score) since kickers aren't run through the same model. Comparing a
+    kicker against a skill player is of limited use for that reason; this is
+    mainly for comparing two kickers, or a mixed list where you want both groups'
+    numbers in one call.
+    """
     b = _build_board()
-    rows = []
+    kb = _build_kicker_board()
+    rows, kicker_rows = [], []
     for n in [x.strip() for x in names.split(",") if x.strip()][:4]:
         r = bd.match_player(n, b)
         if r is not None:
             rows.append(r)
-    if not rows:
+            continue
+        kr = bd.match_player(n, kb) if not kb.empty else None
+        if kr is not None:
+            kicker_rows.append(kr)
+    if not rows and not kicker_rows:
         return json.dumps({"error": "no matches"})
-    df = pd.DataFrame(rows)
-    cols = ["name", "position", "team", "adp", "proj_points", "adj_ppg", "consistency",
-            "startable_rate", "spike_rate", "injury_risk", "exp_games", "vor", "draft_score"]
-    best = df.sort_values("draft_score", ascending=False).iloc[0]
-    return json.dumps({
-        "players": _rows(df.sort_values("draft_score", ascending=False), cols, 4),
-        "verdict": f"{best['name']} — {model.explain(best)}",
-    }, indent=2)
+    out: dict = {}
+    if rows:
+        df = pd.DataFrame(rows)
+        cols = ["name", "position", "team", "adp", "proj_points", "adj_ppg", "consistency",
+                "startable_rate", "spike_rate", "injury_risk", "exp_games", "vor", "draft_score"]
+        best = df.sort_values("draft_score", ascending=False).iloc[0]
+        out["players"] = _rows(df.sort_values("draft_score", ascending=False), cols, 4)
+        out["verdict"] = f"{best['name']} — {model.explain(best)}"
+    if kicker_rows:
+        kdf = pd.DataFrame(kicker_rows)
+        kcols = ["name", "team", "kicker_ppg", "fg_pct", "long_range_share_pct", "context_tier"]
+        out["kickers"] = _rows(kdf.sort_values("kicker_ppg", ascending=False), kcols, 4)
+    return json.dumps(out, indent=2)
 
 
 @mcp.tool()
@@ -962,6 +1033,11 @@ def team_context(team: str) -> str:
     and the touchdown equity that comes with it, is less trustworthy for that team's
     pass catchers); near zero or negative means the passing game keeps its role even in
     the scoring area.
+
+    `drive_efficiency.pct_fg` doubles as the main kicker-opportunity signal
+    `best_available(position="K")`'s `context_tier` is banded from -- how often
+    this team's drives stall into a field goal try at all, independent of who's
+    kicking.
     """
     league, _ = _settings()
     # No pbp argument: that routes through the memoised builders instead of

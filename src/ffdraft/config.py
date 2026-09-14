@@ -53,6 +53,27 @@ class Scoring:
     fumble_lost: float = -2.0
     two_pt: float = 2.0
 
+    # Kicker scoring. Defaults match ESPN's own public default scoring template
+    # (games.espn.com/s/ffllm scoring master list): three distance bands, a flat
+    # penalty for any miss regardless of distance, PAT made/missed. Like every
+    # other field here, these are defaults, not a universal constant -- a specific
+    # league's real settings should override them the same way a custom rec value
+    # would, this project just doesn't have an ESPN-sync path for it yet (see
+    # espn_league_context, which only derives the PPR/half/standard preset from
+    # statId 53, not a full custom scoring set).
+    fg_made_0_39: float = 3.0
+    fg_made_40_49: float = 4.0
+    fg_made_50_plus: float = 5.0
+    fg_missed: float = -1.0       # any distance, made blocks fall under this too
+    pat_made: float = 1.0
+    pat_missed: float = -1.0      # made blocks fall under this too
+    # Extra points for a 50+ make that's specifically 60+, ON TOP OF fg_made_50_plus
+    # (not a replacement -- ESPN's default template has no 60+ tier at all). Off by
+    # default, same convention as qb_boost/coverage_trend in ModelWeights: some
+    # custom leagues add this bonus given how much more common 60+ attempts have
+    # become, but it isn't a default ESPN category, so it doesn't ship enabled.
+    fg_made_60_bonus: float = 0.0
+
     @classmethod
     def preset(cls, name: str) -> Scoring:
         name = name.lower().replace("-", "_")
