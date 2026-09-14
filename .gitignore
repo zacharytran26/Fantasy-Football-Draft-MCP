@@ -24,6 +24,10 @@ state/
 # Never commit league credentials
 .env
 espn_cookies.json
+# Real MCP client config -- holds live ESPN_SWID/ESPN_S2 cookies once filled in
+# locally. claude_desktop_config.example.json (tracked, placeholders only) is
+# the template to copy from.
+claude_desktop_config.json
 
 # Build artifacts
 *.bak
