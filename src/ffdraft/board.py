@@ -336,6 +336,15 @@ class DraftState:
                 counts[pos] = counts.get(pos, 0) + 1
         return counts
 
+    def recent_positions(self, board: pd.DataFrame, n: int = 1) -> list[str]:
+        """Position of the last `n` picks, most recent last -- the state a
+        PositionMarkov transition is conditioned on."""
+        if "_key" not in board.columns or not self.picks:
+            return []
+        idx = board.set_index("_key")["position"].to_dict()
+        tail = sorted(self.picks, key=lambda p: p["overall"])[-n:]
+        return [idx[k] for p in tail if (k := norm_name(p["name"])) in idx]
+
     def summary(self) -> dict:
         return {
             "picks_made": len(self.picks),
@@ -345,6 +354,101 @@ class DraftState:
             "my_next_pick": self.next_pick_for_me(),
             "picks_until_my_turn": max(0, (self.next_pick_for_me() or 0) - self.on_the_clock),
         }
+
+
+# ---------------------------------------------------------------- positional-run model
+
+POSITIONS = ("QB", "RB", "WR", "TE")
+
+
+class PositionMarkov:
+    """First-order Markov chain over position-of-pick, e.g. P(next pick is RB |
+    last pick was RB). Meant to answer "how much longer does this run last" --
+    something a static ADP tier can't, because ADP describes value, not room
+    behavior, and runs are a room-behavior phenomenon (one RB run trips the next
+    team's scarcity alarm regardless of whose ADP says what).
+
+    Sketch only -- not wired into any MCP tool yet. adp.position_run_backtest checked
+    whether transition_probs beats naive baselines at predicting the next position in
+    a season's ECR order, leave-one-season-out; a 2021-2025 run found it clearly beats
+    a uniform guess and "assume the run continues" (persistence), but is a wash
+    against simply guessing that season's most common position (marginal frequency:
+    accuracy 0.389 vs. Markov's 0.376, logloss improvement -0.004) -- the transition
+    structure isn't adding real signal over "WR gets picked most, so guess WR." Same
+    conclusion redzone_shift_backtest reached for the red-zone identity factor: stays
+    a sketch, not wired into who_should_i_pick or draft_score, unless real completed
+    draft order (fed via from_sequences instead of the ECR-order proxy) tells a
+    different story.
+    """
+
+    def __init__(self, prior_counts: pd.DataFrame | None = None, smoothing: float = 1.0):
+        self.smoothing = smoothing
+        self.counts = (prior_counts.copy() if prior_counts is not None
+                       else pd.DataFrame(0.0, index=list(POSITIONS), columns=list(POSITIONS)))
+
+    @classmethod
+    def from_adp_order(cls, board: pd.DataFrame, smoothing: float = 1.0) -> "PositionMarkov":
+        """Prior transition counts from the board's own ADP order, standing in for
+        real cross-room draft order -- we don't store other rooms' actual pick
+        sequences, only where the market ends up ranking players.
+        """
+        return cls.from_sequences([board.sort_values("adp")["position"].tolist()],
+                                  smoothing=smoothing)
+
+    @classmethod
+    def from_sequences(cls, sequences: list[list[str]], smoothing: float = 1.0) -> "PositionMarkov":
+        """Prior fit directly from one or more known position-of-pick sequences,
+        each counted independently so a transition never gets fabricated across a
+        season/draft boundary. Use this over from_adp_order when real order is
+        available -- a completed draft's DraftState.picks, or a sync_espn /
+        sync_sleeper pull -- since that's ground truth rather than a market-order
+        proxy. position_run_backtest (adp.py) uses this to fit each training fold.
+        """
+        m = cls(smoothing=smoothing)
+        for seq in sequences:
+            m._accumulate(seq)
+        return m
+
+    def _accumulate(self, seq: list[str]) -> None:
+        for a, b in zip(seq, seq[1:]):
+            if a in POSITIONS and b in POSITIONS:
+                self.counts.loc[a, b] += 1.0
+
+    def update(self, picks: list[dict], board: pd.DataFrame) -> None:
+        """Fold this draft's actual pick sequence in as live evidence. The room
+        you're actually in runs on its own tendencies (e.g. a TE-heavy league),
+        which a prior fit from generic ADP order can't see on its own.
+        """
+        if "_key" not in board.columns:
+            return
+        idx = board.set_index("_key")["position"].to_dict()
+        ordered = sorted(picks, key=lambda p: p["overall"])
+        seq = [idx.get(norm_name(p["name"])) for p in ordered]
+        self._accumulate([s for s in seq if s in POSITIONS])
+
+    def transition_probs(self, current: str) -> dict[str, float]:
+        """P(next position | current position). Laplace-smoothed (+`smoothing`
+        per cell) so a transition the live draft hasn't shown yet -- likely early
+        on, with few picks made -- reads as unlikely, not impossible.
+        """
+        if current not in self.counts.index:
+            return {p: 1.0 / len(POSITIONS) for p in POSITIONS}
+        row = self.counts.loc[current] + self.smoothing
+        return (row / row.sum()).to_dict()
+
+    def run_probability(self, position: str, current: str, length: int) -> float:
+        """P(the next `length` picks are all `position`), starting from `current`.
+        A cheap proxy for "how much runway is left before this position dries up" --
+        e.g. run_probability("RB", current="RB", length=3) for "does the RB run
+        that just started survive three more picks."
+        """
+        if length <= 0:
+            return 1.0
+        p = self.transition_probs(current).get(position, 0.0)
+        if length == 1:
+            return p
+        p_repeat = self.transition_probs(position).get(position, 0.0)
+        return p * (p_repeat ** (length - 1))
 
 
 # ---------------------------------------------------------------- platform sync

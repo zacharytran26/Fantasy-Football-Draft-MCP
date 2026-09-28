@@ -450,6 +450,125 @@ def redzone_shift_backtest(seasons: list[int], position: str = "WR",
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def position_run_backtest(seasons: list[int], smoothing: float = 1.0) -> pd.DataFrame:
+    """Does board.PositionMarkov predict the next pick's position better than
+    baselines that ignore the current one?
+
+    IMPORTANT caveat this backtest can't get around: there's no stored archive of
+    real snake-draft pick order across many rooms and seasons, only each season's
+    preseason ECR snapshot (preseason_ecr) -- the same market-order proxy
+    PositionMarkov.from_adp_order itself is built from. So this measures something
+    real but narrower than "does it predict human draft-room behavior": whether the
+    position-transition structure implied by consensus rank is stable enough
+    season-to-season to generalize at all. That's a necessary condition for the live
+    model to be useful, not a sufficient one -- an actual positional run is a
+    room-psychology phenomenon (scarcity panic feeding on itself) that this proxy,
+    being a single fixed ranking rather than reactive human picks, can't fully
+    capture. Validating that needs real completed pick order (DraftState.picks,
+    sync_espn, sync_sleeper) fed through PositionMarkov.from_sequences instead.
+
+    Leave-one-season-out: for each test season, fit a model on every *other*
+    season's ECR-order sequence (board.PositionMarkov.from_sequences), then, for
+    every adjacent pair in the test season's own sequence, record the trained
+    model's P(actual next position | current position) alongside two baselines that
+    have no notion of "current position" to compare against: marginal frequency
+    (that position's overall share of picks in the training seasons) and uniform
+    (1/4 flat). A `persistence` column (always predict "same as last") is also
+    recorded for the accuracy comparison, since "assume the run continues" is the
+    naive baseline a room-behavior model most needs to beat.
+    """
+    from . import board as bd
+
+    per_season_seq: dict[int, list[str]] = {}
+    for season in seasons:
+        ecr = preseason_ecr(season)
+        if ecr.empty:
+            print(f"  ! {season}: no preseason ECR snapshot")
+            continue
+        seq = ecr.sort_values("ecr")["position"]
+        seq = seq[seq.isin(bd.POSITIONS)].tolist()
+        if len(seq) < 20:
+            print(f"  ! {season}: too few ranked skill-position players ({len(seq)})")
+            continue
+        per_season_seq[season] = seq
+
+    if len(per_season_seq) < 2:
+        return pd.DataFrame()
+
+    rows = []
+    for test_season, test_seq in per_season_seq.items():
+        train_seqs = [seq for s, seq in per_season_seq.items() if s != test_season]
+        model = bd.PositionMarkov.from_sequences(train_seqs, smoothing=smoothing)
+
+        marginal_counts = {p: 0 for p in bd.POSITIONS}
+        for seq in train_seqs:
+            for p in seq:
+                marginal_counts[p] += 1
+        total = sum(marginal_counts.values()) or 1
+        marginal_probs = {p: c / total for p, c in marginal_counts.items()}
+        uniform_probs = {p: 1.0 / len(bd.POSITIONS) for p in bd.POSITIONS}
+
+        for i in range(len(test_seq) - 1):
+            current, actual_next = test_seq[i], test_seq[i + 1]
+            markov_probs = model.transition_probs(current)
+            rows.append({
+                "season": test_season, "pick_idx": i,
+                "current": current, "actual_next": actual_next,
+                "markov_prob_actual": markov_probs.get(actual_next, 0.0),
+                "marginal_prob_actual": marginal_probs.get(actual_next, 0.0),
+                "uniform_prob_actual": uniform_probs.get(actual_next, 0.0),
+                "markov_top1": max(markov_probs, key=markov_probs.get),
+                "marginal_top1": max(marginal_probs, key=marginal_probs.get),
+                "persistence_top1": current,
+            })
+    return pd.DataFrame(rows)
+
+
+def position_run_backtest_summary(hist: pd.DataFrame) -> dict:
+    """Score position_run_backtest's output: log-loss (lower is better, so
+    improvement = baseline - markov) and top-1 accuracy for the Markov model
+    against the marginal-frequency, uniform, and persistence baselines.
+
+    A positive improvement_* means the Markov transition structure is earning its
+    added complexity over that baseline. Near zero or negative means the simpler
+    baseline predicts the next position just as well, and -- following the same
+    rule redzone_shift_backtest's negative result set for `redzone_identity_shift`
+    -- PositionMarkov shouldn't be wired into anything live until this comes back
+    positive.
+    """
+    if hist.empty:
+        return {"n_transitions": 0}
+
+    def logloss(prob_col: str) -> float:
+        p = hist[prob_col].clip(lower=1e-6)
+        return float(-np.log(p).mean())
+
+    def accuracy(top1_col: str) -> float:
+        return float((hist[top1_col] == hist["actual_next"]).mean())
+
+    markov_ll = logloss("markov_prob_actual")
+    marginal_ll = logloss("marginal_prob_actual")
+    uniform_ll = logloss("uniform_prob_actual")
+    markov_acc = accuracy("markov_top1")
+    marginal_acc = accuracy("marginal_top1")
+    persistence_acc = accuracy("persistence_top1")
+
+    return {
+        "n_transitions": int(len(hist)),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "markov_logloss": markov_ll,
+        "marginal_logloss": marginal_ll,
+        "uniform_logloss": uniform_ll,
+        "improvement_logloss_vs_marginal": marginal_ll - markov_ll,
+        "improvement_logloss_vs_uniform": uniform_ll - markov_ll,
+        "markov_top1_accuracy": markov_acc,
+        "marginal_top1_accuracy": marginal_acc,
+        "persistence_top1_accuracy": persistence_acc,
+        "improvement_accuracy_vs_marginal": markov_acc - marginal_acc,
+        "improvement_accuracy_vs_persistence": markov_acc - persistence_acc,
+    }
+
+
 def matchup_backtest_summary(hist: pd.DataFrame, top_n: int = 24) -> dict:
     """Compare talent-only vs matchup-adjusted score against actual finish.
 

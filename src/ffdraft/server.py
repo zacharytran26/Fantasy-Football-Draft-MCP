@@ -723,6 +723,51 @@ def redzone_shift_backtest(seasons: str = "2022,2023,2024,2025", position: str =
 
 
 @mcp.tool()
+def position_run_backtest(seasons: str = "2021,2022,2023,2024,2025") -> str:
+    """Backtest: does modeling position-of-pick as a Markov chain (board.PositionMarkov)
+    predict the next pick's position better than baselines that ignore the current one?
+
+    Leave-one-season-out over each season's preseason ECR order (a market-order
+    proxy -- there's no stored archive of real snake-draft order across many rooms
+    and seasons to test against instead). For every adjacent pair in each held-out
+    season, scores the Markov model's P(actual next position | current) against
+    marginal-frequency, uniform, and "assume the run continues" (persistence)
+    baselines, via log-loss and top-1 accuracy.
+
+    A positive improvement_* means the transition structure is earning its keep. Near
+    zero or negative means a baseline this simple predicts just as well, and --
+    following the same rule redzone_shift_backtest's negative result set for
+    `redzone_identity_shift` -- PositionMarkov should stay a sketch (see board.py)
+    rather than get wired into who_should_i_pick or draft_score. A 2021-2025 run
+    found exactly that: Markov clearly beats uniform (+0.090 logloss) and "assume the
+    run continues" (+0.054 accuracy), but is a wash against just guessing that
+    season's most common position (marginal frequency: -0.004 logloss, -0.013
+    accuracy) -- the transition structure adds nothing over "WR gets picked most, so
+    guess WR." Re-run this if the underlying proxy or model changes.
+
+    Caveat worth repeating: this tests whether consensus-rank position order
+    generalizes season to season, not whether it predicts real human draft-room
+    behavior -- a positional run is room psychology feeding on itself, which a
+    single fixed ranking can't fully stand in for. Validating that needs real
+    completed pick order (DraftState.picks, sync_espn, sync_sleeper) fed through
+    PositionMarkov.from_sequences instead.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    hist = adp_mod.position_run_backtest(yrs)
+    if hist.empty:
+        return json.dumps({"error": "no position-run backtest data available for those seasons"})
+    summary = adp_mod.position_run_backtest_summary(hist)
+    return json.dumps({
+        "summary": summary,
+        "interpretation": (
+            "logloss: lower is better, improvement = baseline_logloss - markov_logloss; "
+            "accuracy: share of transitions where the top-1 prediction matched the "
+            "actual next position"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
 def draft_backtest(league_id: str, season: int, top_n: int = 3) -> str:
     """Replay a real past ESPN draft: the algorithm's pick, the true hindsight-best
     pick, and what you actually took, round by round.
