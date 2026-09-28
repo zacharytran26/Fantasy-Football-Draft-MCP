@@ -79,18 +79,30 @@ def apply_current_team(tbl: pd.DataFrame, depth_chart: pd.DataFrame) -> pd.DataF
 
     Must run before the O-line / pace / schedule merges below, which key off
     `team`: otherwise a traded player would get graded on his old team's offense.
+
+    Also carries over `depth_rank` (1 = starter, per the official chart) when the
+    feed has it -- roster_construction_mult's handcuff check prefers this over
+    inferring "backup" from a lower draft_score, since two similarly-projected
+    players can be a real committee (neither is really the other's insurance)
+    while a clearly-labelled RB2 is a real handcuff even on the rare occasion his
+    own draft_score isn't the lower of the two.
     """
     if depth_chart is None or depth_chart.empty or "player_id" not in tbl.columns:
         tbl = tbl.copy()
         tbl["off_roster"] = False
+        if "depth_rank" not in tbl.columns:
+            tbl["depth_rank"] = np.nan
         return tbl
+    cols = ["player_id", "team"] + (["depth_rank"] if "depth_rank" in depth_chart.columns else [])
     out = tbl.merge(
-        depth_chart[["player_id", "team"]].rename(columns={"team": "_current_team"}),
+        depth_chart[cols].rename(columns={"team": "_current_team"}),
         on="player_id", how="left",
     )
     has_current = out["_current_team"].notna()
     out.loc[has_current, "team"] = out.loc[has_current, "_current_team"]
     out["off_roster"] = ~has_current
+    if "depth_rank" not in out.columns:
+        out["depth_rank"] = np.nan
     return out.drop(columns=["_current_team"])
 
 
@@ -518,14 +530,27 @@ def survival_probability_vec(adp: np.ndarray, current_pick: int, next_pick: int,
 
 def recommend(board: pd.DataFrame, league: LeagueSettings, current_pick: int,
               next_pick: int | None, roster: dict[str, int] | None = None,
-              top_n: int = 8) -> pd.DataFrame:
+              top_n: int = 8, roster_players: pd.DataFrame | None = None) -> pd.DataFrame:
     """Rank available players for the pick that's on the clock.
 
-    Two ideas drive the ordering beyond raw value:
+    Ideas driving the ordering beyond raw value:
       * Opportunity cost — a player you're confident survives to your next pick is
         worth less right now than an equally good player who certainly won't.
       * Roster need — value is discounted once a position is full and the player
         would only be a bench body, and boosted when a starting slot is still open.
+      * Roster construction — `roster_players` (full rows for who you already
+        own, from DraftState.my_roster_players, not just position counts) drives
+        bye-week collision and real-team exposure discounts, and a handcuff bonus.
+        Unlike the above, this isn't a forecast, just bookkeeping over players you
+        already have -- see roster_construction_mult's docstring.
+
+    A two-turn lookahead (an optional third pick horizon feeding fallback_value)
+    was tried and deliberately left out: survival_probability is provably
+    non-increasing as the pick horizon extends (checked against 20k random draws,
+    min difference 0.0), so expected_best_at_next_pick at a *later* absolute pick
+    can never exceed its value at an earlier one -- max(value_at_next,
+    value_at_next_next) always just equals value_at_next. It would have been dead
+    code, not a real improvement, so it isn't here.
     """
     avail = board[~board["drafted"]].copy() if "drafted" in board.columns else board.copy()
     if avail.empty:
@@ -551,11 +576,18 @@ def recommend(board: pd.DataFrame, league: LeagueSettings, current_pick: int,
     need = _positional_need(league, roster)
     avail["need_mult"] = avail["position"].map(need).fillna(0.7)
 
+    rc = roster_construction_mult(avail, roster_players, league)
+    avail["bye_mult"] = rc["bye_mult"].to_numpy()
+    avail["exposure_mult"] = rc["exposure_mult"].to_numpy()
+    avail["handcuff_mult"] = rc["handcuff_mult"].to_numpy()
+
     # A small share of raw value is retained so a truly generational player still
     # rises even when his position is deep behind him.
     avail["pick_value"] = (
-        0.80 * avail["marginal_value"] + 0.20 * avail["draft_score"]
-    ) * avail["need_mult"]
+        (0.80 * avail["marginal_value"] + 0.20 * avail["draft_score"])
+        * avail["need_mult"] * avail["bye_mult"]
+        * avail["exposure_mult"] * avail["handcuff_mult"]
+    )
     return avail.sort_values("pick_value", ascending=False).head(top_n)
 
 
@@ -582,6 +614,99 @@ def expected_best_at_next_pick(avail: pd.DataFrame) -> dict[str, float]:
     return out
 
 
+def likely_alternative_by_position(avail: pd.DataFrame, current_pick: int,
+                                   next_pick: int | None) -> dict[str, dict]:
+    """Per position, a concrete name for "if you wait, here's who you'd probably
+    still get" -- the best remaining player with at least even odds
+    (p_available_next >= 0.5) of lasting to `next_pick`, or the single best
+    survival chance on the board if nobody clears that bar.
+
+    Uses the exact same survival_probability_vec numbers expected_best_at_next_pick
+    already relies on -- the mechanism position_scarcity_entropy_backtest found to
+    be, by a wide margin, the strongest real predictor of the actual cost of waiting
+    (implied_cost_corr 0.606, against entropy's -0.153). This adds no new signal,
+    just a readable identity instead of an aggregate expected value.
+    """
+    if avail.empty:
+        return {}
+    avail = avail.copy()
+    if next_pick:
+        avail["p_available_next"] = survival_probability_vec(
+            avail["adp"].to_numpy(), current_pick, next_pick)
+    else:
+        avail["p_available_next"] = 0.0
+
+    out: dict[str, dict] = {}
+    for pos, chunk in avail.groupby("position"):
+        chunk = chunk.sort_values("draft_score", ascending=False)
+        likely = chunk[chunk["p_available_next"] >= 0.5]
+        pick = likely.iloc[0] if not likely.empty else chunk.iloc[0]
+        out[pos] = {
+            "name": pick["name"],
+            "p_available_next": round(float(pick["p_available_next"]), 2),
+            "likely": bool(not likely.empty),
+        }
+    return out
+
+
+def position_scarcity_entropy(avail: pd.DataFrame, top_k: int = 12) -> dict[str, float]:
+    """Shannon entropy of each position's remaining talent distribution, normalized
+    to 0-1 -- a shape-of-the-pool signal distinct from expected_best_at_next_pick's
+    timing-based urgency, and from anything ADP-based, since it only looks at how
+    draft_score is distributed among what's left.
+
+    For each position, takes the top `top_k` remaining players by draft_score,
+    treats their scores as an (unnormalized) probability distribution over "who's
+    the best one left", and computes Shannon entropy. A real talent cliff --
+    one or two players clearly ahead of a bunched-up rest of the pool -- concentrates
+    the distribution and pushes entropy toward 0: missing the top name costs real
+    value because nothing close remains. A flat pool where the next several players
+    are all roughly interchangeable pushes entropy toward 1 (its max, log2(top_k)):
+    there's no rush, whoever's left after this pick is about as good.
+
+    This is close to identical in spirit to expected_best_at_next_pick, deliberately:
+    both walk the same sorted per-position pool. The difference is what each does
+    with player values -- expected_best_at_next_pick weights by p_available_next to
+    ask "how much value do I get if I wait", while this ignores pick timing entirely
+    and asks "how lumpy is the pool itself" -- the two are meant to be compared
+    against each other in a backtest, not assumed complementary.
+
+    Sketch only -- not wired into recommend() or draft_score.
+    adp.position_scarcity_entropy_backtest checked exactly that question: a 2021-2025
+    run (1000 samples) found entropy actually *anti*-correlates with the real,
+    per-position-normalized cost of waiting (entropy_corr -0.153) -- worse than doing
+    nothing, and far worse than expected_best_at_next_pick's own survival-probability
+    estimate of the same drop (implied_cost_corr 0.606, the mechanism recommend()
+    already runs live). This isn't just a scale artifact either -- the same check
+    against the raw, unnormalized drop looked modestly positive within every
+    individual position, but that reading flipped negative once the target was
+    normalized, because value_now and entropy both drift with pick depth and were
+    only ever moving together through that lurking variable. Same conclusion
+    redzone_shift_backtest and position_run_backtest each reached for their own
+    factor: this stays a sketch, not wired into recommend() or draft_score.
+    """
+    out: dict[str, float] = {}
+    for pos, chunk in avail.groupby("position"):
+        chunk = chunk.sort_values("draft_score", ascending=False).head(top_k)
+        scores = chunk["draft_score"].to_numpy(dtype=float)
+        scores = scores - min(0.0, scores.min())  # shift so a negative score can't
+                                                   # flip the sign of the distribution
+        total = scores.sum()
+        if total <= 0 or len(scores) < 2:
+            out[pos] = 1.0  # nothing left to be scarce about -- treat as "flat"
+            continue
+        p = scores / total
+        # np.where(p > 0, p * log2(p), 0) still evaluates log2(0) for the masked-out
+        # side before discarding it -- real boards have plenty of exactly-zero
+        # draft_score bench fodder, so that's not a hypothetical, it's a guaranteed
+        # RuntimeWarning on every live board. Masking before the log2 call avoids
+        # computing it on zeros at all instead of computing-then-discarding.
+        nz = p[p > 0]
+        h = -np.sum(nz * np.log2(nz))
+        out[pos] = float(h / np.log2(len(scores)))
+    return out
+
+
 # How much a bench player at each position is worth relative to the one ahead of him.
 # RB and WR depth holds real value because injuries and byes force them into lineups
 # constantly. A second QB, in a non-superflex league, never starts at all outside
@@ -596,6 +721,139 @@ def expected_best_at_next_pick(avail: pd.DataFrame) -> dict[str, float]:
 BACKUP_DECAY = {"QB": 0.04, "TE": 0.28, "RB": 0.72, "WR": 0.70}
 # Past these counts a player cannot realistically help you, whatever his projection.
 ROSTER_CAP = {"QB": 2, "TE": 2, "RB": 6, "WR": 7}
+
+# Discount keyed on how many *starting slots* a bye week would leave unfilled at
+# that position group (see _bye_shortfall) -- not a raw "how many teammates share
+# this bye" count. A raw count flags harmless bench redundancy (two backup WRs on
+# bye while five others are healthy) exactly the same as a real problem (your only
+# three RBs all sharing one), which is what the first version of this check did.
+BYE_SHORTFALL_DECAY = {1: 0.85, 2: 0.60, 3: 0.40}
+# Discount keyed on how many rostered players already come from this NFL team --
+# a scheme change, coordinator firing or O-line injury can tank several of your
+# players in the same week, a correlated-bust risk raw draft_score can't see.
+TEAM_EXPOSURE_DECAY = {2: 0.95, 3: 0.85, 4: 0.70}
+# Bonus for a player who reads as the backup (same team, same position) to someone
+# already on your roster -- insurance value: losing your starter hands this player
+# the touches on the same offense. Real handcuffing is a running-back-specific
+# idea (a timeshare/committee shift concentrates onto one backup); it doesn't have
+# a clean analogue at the other positions.
+HANDCUFF_BONUS = 1.15
+HANDCUFF_ELIGIBLE = {"RB"}
+
+
+def _tiered_mult(count: int, table: dict[int, float]) -> float:
+    """The decay for the highest threshold in `table` that `count` meets or beats,
+    else 1.0 (no effect) -- shared by the bye-shortfall and team-exposure checks."""
+    mult = 1.0
+    for threshold in sorted(table):
+        if count >= threshold:
+            mult = table[threshold]
+    return mult
+
+
+def _bye_shortfall(position: str, bye, roster_players: pd.DataFrame,
+                   league: LeagueSettings) -> int:
+    """How many starting slots would go unfilled the week `bye` falls, if a player
+    at `position` with that bye joined the roster -- 0 if the roster (plus this
+    candidate) still covers every starter at that position group that week.
+
+    Checked against the combined FLEX-eligible group (RB/WR/TE plus the FLEX slot)
+    rather than the exact position alone, since a thin RB week can be covered by an
+    extra rostered WR/TE in the FLEX slot and vice versa. QB folds in the
+    superflex slot count the same way _positional_need does, since a second
+    required QB only exists in superflex.
+    """
+    if bye is None or pd.isna(bye) or not {"position", "bye"}.issubset(roster_players.columns):
+        return 0
+    if position in league.flex_eligible:
+        group = league.flex_eligible
+        required = sum(league.starters.get(p, 0) for p in group) + league.starters.get("FLEX", 0)
+    elif position == "QB":
+        group = ("QB",)
+        required = league.starters.get("QB", 0) + (getattr(league, "superflex", 0) or 0)
+    else:
+        group = (position,)
+        required = league.starters.get(position, 0)
+    pool = roster_players[roster_players["position"].isin(group)]
+    total_owned = len(pool) + 1  # + this candidate
+    on_bye = int((pool["bye"] == bye).sum()) + 1  # + this candidate
+    return max(0, required - (total_owned - on_bye))
+
+
+def roster_construction_mult(avail: pd.DataFrame, roster_players: pd.DataFrame | None,
+                             league: LeagueSettings | None = None) -> pd.DataFrame:
+    """Per-candidate multipliers driven by who's already on your roster: bye-week
+    lineup shortfalls, real-team exposure, and handcuff insurance value.
+
+    Unlike PositionMarkov or position_scarcity_entropy, this doesn't need its own
+    backtest before being trusted -- it isn't forecasting anything about the draft
+    or the season, it's deterministic bookkeeping over players you already own, the
+    same category _positional_need's need_mult already falls into.
+
+    Returns a DataFrame of `bye_mult` / `exposure_mult` / `handcuff_mult` columns
+    aligned to avail's index, all 1.0 when roster_players is empty or missing the
+    columns (`team`, `bye`, `position`, `draft_score`, `depth_rank`) a check needs --
+    a league or board without bye-week data (schedule not published yet), team
+    data, or a published depth chart just skips that one check rather than raising.
+    `league` defaults to a generic LeagueSettings() when omitted, since the bye
+    check needs starter counts to know what a "shortfall" even means.
+    """
+    league = league or LeagueSettings()
+    n = len(avail)
+    out = pd.DataFrame({"bye_mult": np.ones(n), "exposure_mult": np.ones(n),
+                        "handcuff_mult": np.ones(n)}, index=avail.index)
+    if roster_players is None or roster_players.empty:
+        return out
+
+    if "bye" in avail.columns and {"position", "bye"}.issubset(roster_players.columns):
+        out["bye_mult"] = avail.apply(
+            lambda r: _tiered_mult(
+                _bye_shortfall(r["position"], r.get("bye"), roster_players, league),
+                BYE_SHORTFALL_DECAY),
+            axis=1)
+
+    if "team" in roster_players.columns and "team" in avail.columns:
+        team_counts = roster_players["team"].dropna().value_counts().to_dict()
+        out["exposure_mult"] = avail["team"].map(
+            lambda t: _tiered_mult(team_counts.get(t, 0), TEAM_EXPOSURE_DECAY)
+            if pd.notna(t) else 1.0)
+
+        if {"position", "draft_score"}.issubset(roster_players.columns) and \
+                {"position", "draft_score"}.issubset(avail.columns):
+            has_depth_rank = ("depth_rank" in roster_players.columns
+                             and roster_players["depth_rank"].notna().any())
+            best_owned = {}
+            for key, chunk in roster_players.groupby(["team", "position"]):
+                if has_depth_rank and chunk["depth_rank"].notna().any():
+                    row = chunk.loc[chunk["depth_rank"].idxmin()]
+                    best_owned[key] = {"depth_rank": row["depth_rank"],
+                                       "draft_score": row.get("draft_score")}
+                else:
+                    row = chunk.loc[chunk["draft_score"].idxmax()]
+                    best_owned[key] = {"depth_rank": np.nan, "draft_score": row["draft_score"]}
+
+            def handcuff(row) -> float:
+                if row["position"] not in HANDCUFF_ELIGIBLE:
+                    return 1.0
+                owned = best_owned.get((row.get("team"), row["position"]))
+                if owned is None:
+                    return 1.0
+                cand_rank = row.get("depth_rank")
+                # Real depth-chart order first: a clearly-labelled RB2 is a real
+                # handcuff even on the rare occasion his own draft_score isn't the
+                # lower of the two, and two similarly-projected backs who are both
+                # rank 1/1A (a real committee) correctly get no bonus either way --
+                # value alone can't tell a committee from a true backup.
+                if pd.notna(cand_rank) and pd.notna(owned["depth_rank"]):
+                    return HANDCUFF_BONUS if cand_rank > owned["depth_rank"] else 1.0
+                owned_score = owned.get("draft_score")
+                if owned_score is not None and pd.notna(owned_score):
+                    return HANDCUFF_BONUS if row["draft_score"] < owned_score else 1.0
+                return 1.0
+
+            out["handcuff_mult"] = avail.apply(handcuff, axis=1)
+
+    return out
 
 
 def _positional_need(league: LeagueSettings, roster: dict[str, int]) -> dict[str, float]:
@@ -673,4 +931,13 @@ def explain(row: pd.Series) -> str:
     p = row.get("p_available_next")
     if p is not None and np.isfinite(p):
         bits.append(f"{p:.0%} chance he lasts to your next pick")
+    bm = row.get("bye_mult")
+    if bm is not None and np.isfinite(bm) and bm < 0.97:
+        bits.append(f"bye-week clash with your roster ({bm:.2f}x)")
+    em = row.get("exposure_mult")
+    if em is not None and np.isfinite(em) and em < 0.97:
+        bits.append(f"heavy {row.get('team', 'that team')} exposure already ({em:.2f}x)")
+    hm = row.get("handcuff_mult")
+    if hm is not None and np.isfinite(hm) and hm > 1.02:
+        bits.append(f"handcuff value behind your own {row.get('team', '')} RB".rstrip())
     return "; ".join(bits)

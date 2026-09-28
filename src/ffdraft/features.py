@@ -418,6 +418,101 @@ def _strength_of_schedule(target_season: int, defense: pd.DataFrame) -> pd.DataF
     return out
 
 
+def bye_weeks(season: int | None = None) -> dict[str, int]:
+    """Each team's bye week for `season`, derived from the schedule rather than a
+    separate feed -- a team's bye is simply the week in that season's regular-season
+    span where it shows up in neither `home_team` nor `away_team`.
+
+    Empty dict if that season's schedule isn't published yet (byes aren't set until
+    the full slate drops) or doesn't parse into exactly one missing week per team --
+    a "nice if available" signal, same posture as depth_charts, not a hard
+    dependency, so recommend()'s bye-collision check just sees "no bye" and skips it.
+    """
+    from .config import CURRENT_SEASON
+
+    season = season or CURRENT_SEASON
+    sched = sources.schedules()
+    reg = sched[(sched["season"] == season) & (sched["game_type"] == "REG")]
+    if reg.empty:
+        return {}
+
+    teams = pd.unique(pd.concat([reg["home_team"], reg["away_team"]]))
+    weeks = sorted(reg["week"].unique())
+    out = {}
+    for team in teams:
+        played = set(reg.loc[(reg["home_team"] == team) | (reg["away_team"] == team), "week"])
+        missing = [w for w in weeks if w not in played]
+        if len(missing) == 1:
+            out[str(team)] = int(missing[0])
+    return out
+
+
+def vacated_role_events(weekly: pd.DataFrame, byes: dict[int, dict[str, int]],
+                        positions: tuple[str, ...] = ("WR", "TE"),
+                        min_games: int = 6) -> pd.DataFrame:
+    """One row per (a teammate's target-share performance in a week his same-team,
+    same-position teammate didn't play) -- the generalized version of "if Chase is
+    out, how much does Higgins' role actually grow," across every real absence in
+    `weekly` instead of one hand-picked pair.
+
+    For each such absence (team T, position group P, player `player_out` missing a
+    week that isn't T's bye -- byes have every teammate out too, not a real
+    role-vacancy signal), and each teammate who did play that week:
+      - `trailing_share`: the teammate's own average target_share in weeks *before*
+        this one where `player_out` was active -- the predictor, using only
+        information available before the absence, the way a live "who benefits"
+        read would have to.
+      - `baseline_share`: the teammate's average target_share across every *other*
+        week (before or after) `player_out` was active -- the ground truth for
+        "what's normal for this teammate," allowed to use future weeks since it's
+        establishing a comparison baseline, not predicting anything.
+      - `actual_share`: the teammate's target_share in the absence week itself.
+      - `share_lift` = actual_share - baseline_share: the real redistribution.
+
+    `min_games` filters to players with a real sample at that position for that
+    team-season (a one-game cameo isn't a "teammate" in any usable sense). Needs a
+    trailing sample *and* an "other weeks" sample to compute both columns, so a
+    player's very first eligible absence of the season (no prior in-weeks yet) is
+    dropped rather than left half-populated.
+    """
+    w = weekly[weekly["position"].isin(positions)].dropna(subset=["target_share"]).copy()
+    rows = []
+    for season, s in w.groupby("season"):
+        bye_map = byes.get(season, {})
+        for team, t in s.groupby("recent_team"):
+            team_weeks = sorted(t["week"].unique())
+            bye = bye_map.get(team)
+            for pos, p in t.groupby("position"):
+                counts = p.groupby("player_display_name")["week"].nunique()
+                roster = counts[counts >= min_games].index.tolist()
+                if len(roster) < 2:
+                    continue
+                for player_out in roster:
+                    out_weeks = set(p.loc[p["player_display_name"] == player_out, "week"])
+                    missed = [wk for wk in team_weeks if wk not in out_weeks and wk != bye]
+                    for wk in missed:
+                        for mate in (m for m in roster if m != player_out):
+                            mate_rows = p[p["player_display_name"] == mate]
+                            prior_in = mate_rows[(mate_rows["week"] < wk) &
+                                                 (mate_rows["week"].isin(out_weeks))]
+                            this_wk = mate_rows[mate_rows["week"] == wk]
+                            other_in = mate_rows[(mate_rows["week"] != wk) &
+                                                 (mate_rows["week"].isin(out_weeks))]
+                            if prior_in.empty or this_wk.empty or other_in.empty:
+                                continue
+                            rows.append({
+                                "season": season, "team": team, "position": pos,
+                                "week": int(wk), "player_out": player_out, "teammate": mate,
+                                "trailing_share": float(prior_in["target_share"].mean()),
+                                "actual_share": float(this_wk["target_share"].iloc[0]),
+                                "baseline_share": float(other_in["target_share"].mean()),
+                            })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["share_lift"] = out["actual_share"] - out["baseline_share"]
+    return out
+
+
 # ---------------------------------------------------------------- player level
 
 def player_season_profiles(sc: Scoring, te_bonus: float = 0.0, seasons=None) -> pd.DataFrame:

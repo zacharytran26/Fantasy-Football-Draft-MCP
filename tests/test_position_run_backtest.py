@@ -88,3 +88,27 @@ class TestPositionRunBacktest:
         hist = adp.position_run_backtest([2024])
         assert hist.empty
         assert adp.position_run_backtest_summary(hist) == {"n_transitions": 0}
+
+
+class TestRealDraftPositionRunBacktest:
+    """real_draft_position_run_backtest takes pre-resolved sequences directly (no
+    network calls), so these exercise the shared leave-one-out logic the same way
+    the ECR-based tests above do, just via the real-draft entry point."""
+
+    def test_learnable_pattern_scores_the_same_way_as_the_ecr_version(self):
+        seqs = {2021: [p for _, p in _alternating_order()],
+               2022: [p for _, p in _alternating_order()],
+               2023: [p for _, p in _alternating_order()],
+               2024: [p for _, p in _alternating_order()]}
+        hist = adp.real_draft_position_run_backtest(seqs)
+        assert not hist.empty
+
+        summary = adp.position_run_backtest_summary(hist)
+        assert summary["markov_top1_accuracy"] == 1.0
+        assert summary["persistence_top1_accuracy"] == 0.0
+
+    def test_single_season_returns_empty(self):
+        seqs = {2024: [p for _, p in _alternating_order()]}
+        hist = adp.real_draft_position_run_backtest(seqs)
+        assert hist.empty
+        assert adp.position_run_backtest_summary(hist) == {"n_transitions": 0}

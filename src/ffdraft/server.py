@@ -91,6 +91,7 @@ def _build_board(force: bool = False) -> pd.DataFrame:
         adp = None
     proj = bd.attach_adp(proj, adp)
     proj = bd.convert_adp_format(proj, _scoring_label(league))
+    proj = bd.attach_bye_weeks(proj)
     proj.to_parquet(path, index=False)
     _BOARDS[key] = proj
     return proj
@@ -307,7 +308,10 @@ def who_should_i_pick(limit: int = 6) -> str:
     """The live draft-analyst call: who to take right now, and why.
 
     Weighs projected value, week-to-week consistency, your roster's open starting
-    slots, and the odds each player survives to your next pick.
+    slots, the odds each player survives to your next pick, and roster-construction
+    bookkeeping: bye-week collisions with players you already own, over-exposure to
+    one real NFL team, and handcuff insurance value for a backup behind your own
+    running back.
     """
     league, _ = _settings()
     state = _state()
@@ -318,11 +322,16 @@ def who_should_i_pick(limit: int = 6) -> str:
         current = nxt  # you're not up yet; evaluate for your actual next pick
     else:
         current = on_clock
-    after = state.pick_after_next() if nxt == current else nxt
+    upcoming = state.upcoming_picks(after=current + 1, n=1)
+    after = upcoming[0] if upcoming else None
 
     roster = state.my_roster(b)
+    roster_players = state.my_roster_players(b)
     recs = model.recommend(b, league, current_pick=current, next_pick=after,
-                           roster=roster, top_n=limit)
+                           roster=roster, top_n=limit, roster_players=roster_players)
+
+    avail = b[~b["drafted"]] if "drafted" in b.columns else b
+    alternatives = model.likely_alternative_by_position(avail, current, after)
 
     picks = []
     for _, r in recs.iterrows():
@@ -341,6 +350,7 @@ def who_should_i_pick(limit: int = 6) -> str:
         "picks_you_wait": (after - current) if after else None,
         "your_roster": roster,
         "recommendations": picks,
+        "if_you_wait_you_would_probably_still_get": alternatives,
         "headline": (f"Take {picks[0]['player']} — {picks[0]['why']}" if picks else "Board empty"),
     }, indent=2)
 
@@ -748,9 +758,9 @@ def position_run_backtest(seasons: str = "2021,2022,2023,2024,2025") -> str:
     Caveat worth repeating: this tests whether consensus-rank position order
     generalizes season to season, not whether it predicts real human draft-room
     behavior -- a positional run is room psychology feeding on itself, which a
-    single fixed ranking can't fully stand in for. Validating that needs real
-    completed pick order (DraftState.picks, sync_espn, sync_sleeper) fed through
-    PositionMarkov.from_sequences instead.
+    single fixed ranking can't fully stand in for. real_draft_position_run_backtest
+    validated that directly on one real league's actual pick order and found the
+    same answer (see its own docstring), so this isn't a proxy artifact.
     """
     yrs = [int(s) for s in seasons.split(",") if s.strip()]
     hist = adp_mod.position_run_backtest(yrs)
@@ -763,6 +773,165 @@ def position_run_backtest(seasons: str = "2021,2022,2023,2024,2025") -> str:
             "logloss: lower is better, improvement = baseline_logloss - markov_logloss; "
             "accuracy: share of transitions where the top-1 prediction matched the "
             "actual next position"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
+def real_draft_position_run_backtest(league_id: str,
+                                     seasons: str = "2021,2022,2023,2024,2025") -> str:
+    """Backtest: on one real ESPN league's actual draft history, does PositionMarkov
+    predict the next pick's position better than baselines that ignore the current
+    one -- using real reactive human pick order, not position_run_backtest's
+    ECR-order market proxy?
+
+    Pulls each season's real completed draft via sync_espn (needs ESPN_SWID/ESPN_S2
+    env vars for a private league), resolves each pick's name to a position from
+    that season's real box scores (board.resolve_pick_positions -- D/ST picks and
+    any name that doesn't match a real skill-position player that season are
+    dropped, not guessed), then runs the identical leave-one-season-out evaluation
+    position_run_backtest uses, scored the same way.
+
+    A 2021-2025 run on one real league (694 real transitions across 5 drafts) found
+    the same answer the ECR-order proxy did: Markov beat uniform (+0.098 logloss)
+    and "assume the run continues" (+0.086 accuracy), but was a wash against
+    marginal frequency on logloss (+0.0005, essentially zero) and slightly *worse*
+    than it on accuracy (-0.010). Positional runs, at least in that room, genuinely
+    aren't more predictable than base rates -- the proxy wasn't hiding a real
+    signal. Small-sample caveat: one league's five drafts is only a few hundred
+    transitions, thinner than a market-order proxy across many more "seasons" can
+    offer, so treat any given league's result as a read on that room specifically.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    sequences: dict[int, list[str]] = {}
+    for season in yrs:
+        try:
+            picks = bd.sync_espn(league_id, season=season)
+            seq = bd.resolve_pick_positions(picks, season)
+            if len(seq) >= 20:
+                sequences[season] = seq
+            else:
+                print(f"  ! {season}: too few resolved skill-position picks ({len(seq)})")
+        except Exception as exc:
+            print(f"  ! {season}: {type(exc).__name__}: {exc}")
+
+    if len(sequences) < 2:
+        return json.dumps({"error": "need real draft data for at least 2 seasons to backtest "
+                                    "-- check the league id and ESPN_SWID/ESPN_S2"})
+    hist = adp_mod.real_draft_position_run_backtest(sequences)
+    summary = adp_mod.position_run_backtest_summary(hist)
+    return json.dumps({
+        "league_id": league_id,
+        "seasons_used": sorted(sequences.keys()),
+        "picks_resolved_per_season": {s: len(seq) for s, seq in sequences.items()},
+        "summary": summary,
+        "interpretation": (
+            "logloss: lower is better, improvement = baseline_logloss - markov_logloss; "
+            "accuracy: share of transitions where the top-1 prediction matched the "
+            "actual next position"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
+def position_scarcity_entropy_backtest(seasons: str = "2021,2022,2023,2024,2025") -> str:
+    """Backtest: does model.position_scarcity_entropy (Shannon entropy of a
+    position's remaining talent pool) predict the real cost of waiting on that
+    position -- and does it add anything over what recommend() already computes via
+    survival probability?
+
+    For each season, builds the same leak-free board draft_backtest/mock_draft use,
+    sorts it by that season's real ADP as a pseudo draft order (there's no bulk
+    archive of real snake-draft order to test against instead), and at sampled pick
+    indices measures the actual drop in the best-remaining-player's draft_score once
+    a further `window` picks are removed, normalized to a fraction of that player's
+    own draft_score -- positions don't share a draft_score scale, so an unnormalized
+    drop would measure "which position scores bigger" as much as any real
+    relationship. Scores four predictors of that fractional drop via Spearman
+    correlation: entropy, pool_size and raw_gap (baselines that ignore the pool's
+    shape or ignore ADP timing), and implied_cost (what expected_best_at_next_pick --
+    the survival-probability mechanism already live in recommend() -- predicts for
+    the same horizon).
+
+    A positive improvement_vs_* means entropy earns its keep over that baseline. Near
+    zero or negative -- especially for improvement_vs_implied_cost -- means it's
+    redundant with (or worse than) machinery already live, and -- same rule
+    position_run_backtest's result applied to PositionMarkov -- it should stay a
+    sketch (see model.py) rather than get wired into recommend()/draft_score. A
+    2021-2025 run (1000 samples) found exactly that, more decisively than
+    PositionMarkov's result: entropy actually *anti*-correlates with the real
+    fractional drop (entropy_corr -0.153) -- and that's after ruling out a scale
+    confound, not because of one: the same check against the raw, unnormalized drop
+    looked modestly positive within every individual position, but flipped negative
+    once properly normalized, meaning the raw reading was itself just pick depth
+    (value_now and entropy both drift with it) driving both variables together, not
+    real signal. expected_best_at_next_pick's own survival-probability estimate --
+    already live in recommend() -- predicts the real drop far better on its own
+    (implied_cost_corr 0.606) than entropy does.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    hist = adp_mod.position_scarcity_entropy_backtest(yrs)
+    if hist.empty:
+        return json.dumps({"error": "no position-scarcity backtest data available for those seasons"})
+    summary = adp_mod.position_scarcity_entropy_backtest_summary(hist)
+    return json.dumps({
+        "summary": summary,
+        "interpretation": (
+            "all correlations are Spearman rank correlation against the actual "
+            "draft_score drop as a fraction of the current best player's own "
+            "draft_score; improvement_vs_X = entropy_corr - X_corr, positive means "
+            "entropy predicts the drop better than X"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
+def vacated_role_backtest(seasons: str = "2021,2022,2023,2024,2025",
+                         positions: str = "WR,TE", min_games: int = 6) -> str:
+    """Backtest: does a teammate's existing target-share volume predict who
+    benefits when a same-team, same-position starter misses a game? The general
+    version of "if Chase is out, how much does Higgins' role grow" -- every real
+    qualifying absence in `seasons`, not one hand-picked pair.
+
+    For every teammate who played in a week a same-position starter didn't (team
+    byes excluded -- everyone's out then, that's not a role vacancy), scores
+    `trailing_share` (that teammate's own target_share average from weeks *before*
+    the absence, when the starter was active -- the predictor) against
+    `share_lift` (how much their target_share actually rose that week versus their
+    normal baseline -- the real outcome), two ways: Spearman correlation pooled
+    across every teammate-row, and top-1 accuracy -- does the teammate with the
+    highest trailing_share turn out to be the biggest actual gainer in that
+    specific absence, against a random-guess baseline sized to how many
+    candidate teammates were in the race.
+
+    A 2021-2025 run (13,507 teammate-rows across 3,950 absences) found a genuinely
+    mixed result, not a clean win: top1_accuracy barely beats the random baseline
+    (0.371 vs. 0.345, +0.025), while the pooled correlation is actually *negative*
+    (-0.118) -- existing volume gives a slight edge at picking the single biggest
+    absolute gainer, but doesn't track the size of anyone's bump, likely because a
+    player already getting a lot of targets has less room to grow proportionally
+    (a ceiling effect) even on the occasions he is the top gainer. This matches the
+    hand-checked Chase/Higgins result that motivated building this (two absences,
+    one real bump, one no-show) -- it wasn't a small-sample fluke, it's genuinely
+    this noisy at scale. Not clean enough to wire into recommend()/draft_score or a
+    live "who benefits" score; treat any single real-world case (like Chase/Higgins)
+    as anecdotal, not a reliable read.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    pos = tuple(p.strip().upper() for p in positions.split(",") if p.strip())
+    hist = adp_mod.vacated_role_backtest(yrs, positions=pos, min_games=min_games)
+    if hist.empty:
+        return json.dumps({"error": "no vacated-role backtest data available for those seasons/positions"})
+    summary = adp_mod.vacated_role_backtest_summary(hist)
+    return json.dumps({
+        "positions": list(pos),
+        "summary": summary,
+        "interpretation": (
+            "trailing_share_vs_lift_corr: Spearman correlation, pooled across every "
+            "teammate-row, between pre-absence volume and the actual target-share "
+            "bump; top1_accuracy: share of absences where the highest-trailing-share "
+            "teammate was also the biggest actual gainer, vs. random_baseline_accuracy "
+            "(1/n_candidates, averaged per absence)"
         ),
     }, indent=2, default=str)
 
@@ -1153,8 +1322,8 @@ def plan_my_draft(strategy: str = "balanced") -> str:
     """
     league, weights = _settings()
     state = _state()
-    b = _mark_drafted(_build_board(), state).copy()
-    b = b[~b["drafted"]]
+    full_b = _mark_drafted(_build_board(), state)
+    b = full_b[~full_b["drafted"]].copy()
 
     tilt = {
         "zero_rb": {"RB": 0.72, "WR": 1.12, "TE": 1.05, "QB": 0.95},
@@ -1165,6 +1334,7 @@ def plan_my_draft(strategy: str = "balanced") -> str:
 
     my_picks = [p for p in state.my_picks() if p >= state.on_the_clock]
     roster: dict[str, int] = dict(state.my_roster(b))
+    roster_players_rows = [state.my_roster_players(full_b)]
     taken: set[str] = set()
     plan = []
 
@@ -1181,13 +1351,15 @@ def plan_my_draft(strategy: str = "balanced") -> str:
         for pos, mult in tilt.items():
             pool.loc[pool["position"] == pos, "draft_score"] *= mult
 
+        roster_players = pd.concat(roster_players_rows, ignore_index=True)
         recs = model.recommend(pool, league, current_pick=pick, next_pick=nxt,
-                               roster=roster, top_n=3)
+                               roster=roster, top_n=3, roster_players=roster_players)
         if recs.empty:
             break
         top = recs.iloc[0]
         taken.add(top["_key"])
         roster[top["position"]] = roster.get(top["position"], 0) + 1
+        roster_players_rows.append(top.to_frame().T)
         plan.append({
             "round": (pick - 1) // league.teams + 1, "pick": pick,
             "player": top["name"], "position": top["position"], "team": top.get("team"),

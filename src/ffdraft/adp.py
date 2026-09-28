@@ -492,6 +492,17 @@ def position_run_backtest(seasons: list[int], smoothing: float = 1.0) -> pd.Data
             continue
         per_season_seq[season] = seq
 
+    return _position_run_leave_one_out(per_season_seq, smoothing)
+
+
+def _position_run_leave_one_out(per_season_seq: dict[int, list[str]],
+                                smoothing: float = 1.0) -> pd.DataFrame:
+    """Shared leave-one-season-out evaluation for position_run_backtest (ECR-order
+    sequences) and real_draft_position_run_backtest (real completed draft order) --
+    identical scoring either way, so position_run_backtest_summary works on both.
+    """
+    from . import board as bd
+
     if len(per_season_seq) < 2:
         return pd.DataFrame()
 
@@ -522,6 +533,37 @@ def position_run_backtest(seasons: list[int], smoothing: float = 1.0) -> pd.Data
                 "persistence_top1": current,
             })
     return pd.DataFrame(rows)
+
+
+def real_draft_position_run_backtest(sequences: dict[int, list[str]],
+                                     smoothing: float = 1.0) -> pd.DataFrame:
+    """The real-data version of position_run_backtest: does PositionMarkov predict
+    the next pick's position better than the same baselines, fit and evaluated on
+    actual completed draft order instead of the ECR-order proxy?
+
+    `sequences` maps season -> the real position-of-pick sequence for that draft
+    (e.g. one real league's picks each year, resolved to positions and filtered to
+    QB/RB/WR/TE via board.POSITIONS). Unlike position_run_backtest, this is
+    reactive human behavior -- actual room psychology, not a fixed market ranking
+    -- so it's the real test of whether PositionMarkov captures positional runs,
+    not just whether consensus rank order is stable season to season. The
+    trade-off is sample size: one league's five drafts is ~800-1000 real
+    transitions total, split four ways for leave-one-season-out training, far
+    thinner than what a market-order proxy across many more "seasons" could offer,
+    so treat any result here as suggestive for *this room specifically*, not
+    proof the mechanism generalizes to other draft rooms.
+
+    Same leave-one-season-out evaluation as position_run_backtest, scored by the
+    same position_run_backtest_summary. A real run against one league's 2021-2025
+    drafts (694 real transitions, resolved via board.resolve_pick_positions) found
+    the same answer the ECR-order proxy did, not a hidden signal the proxy was
+    masking: Markov beat uniform (+0.098 logloss) and persistence (+0.086
+    accuracy), but was a wash against marginal frequency on logloss (+0.0005,
+    essentially zero) and slightly *worse* than it on accuracy (-0.010). Positional
+    runs, at least in this room, genuinely aren't more predictable than base rates
+    -- it isn't that the ADP-order proxy failed to capture something real.
+    """
+    return _position_run_leave_one_out(sequences, smoothing)
 
 
 def position_run_backtest_summary(hist: pd.DataFrame) -> dict:
@@ -566,6 +608,170 @@ def position_run_backtest_summary(hist: pd.DataFrame) -> dict:
         "persistence_top1_accuracy": persistence_acc,
         "improvement_accuracy_vs_marginal": markov_acc - marginal_acc,
         "improvement_accuracy_vs_persistence": markov_acc - persistence_acc,
+    }
+
+
+def position_scarcity_entropy_backtest(seasons: list[int], league=None, weights=None,
+                                       window: int | None = None, stride: int = 4,
+                                       cutoff: int = DRAFTABLE_ECR_CUTOFF) -> pd.DataFrame:
+    """Does model.position_scarcity_entropy predict the real cost of waiting on a
+    position, better than baselines that ignore the pool's shape -- including the
+    survival-probability mechanism already live in recommend()?
+
+    Same ground-truth limitation as position_run_backtest: there's no bulk archive
+    of real snake-draft order, so "who's picked when" comes from that season's ADP
+    order instead -- a leak-free board (build_player_table + project, bounded to
+    seasons strictly before the one being tested, then ADP-joined, exactly like
+    draft_backtest/mock_draft build it) sorted by ADP into a pseudo draft order.
+
+    At sampled pick indices within the first `cutoff` picks, for each position with
+    at least 2 players left in that pseudo order:
+      - `entropy`: position_scarcity_entropy's reading of the *current* remaining pool
+      - `cost` (the real target): how much the best remaining player at that position
+        actually drops in draft_score once `window` more picks are removed in ADP
+        order (window defaults to league.teams -- a proxy for "until your next turn")
+      - `pool_size` and `raw_gap` (best minus second-best, unnormalized): two
+        baselines that read the same pool but ignore its shape
+      - `implied_cost`: what expected_best_at_next_pick -- the mechanism recommend()
+        already runs live, using each player's own ADP-implied survival odds --
+        predicts for that same horizon. Entropy needs to beat this, or at least not
+        be redundant with it, to be worth adding rather than just recomputing what
+        urgency/marginal_value already capture.
+
+    `cost`, `raw_gap`, and `implied_cost` are all also recorded as a `_frac` version
+    (divided by `value_now`, the current best remaining player's draft_score) --
+    position_scarcity_entropy_backtest_summary scores against those, not the raw
+    ones. Positions don't share a draft_score scale (QB's runs structurally larger
+    than every other position's, per BACKUP_DECAY's own comment in model.py; WR's
+    pool is far deeper than QB's per-position too), so pooling raw, unnormalized
+    drops across positions before rank-correlating them measures "which position
+    scores bigger" as much as it measures any real relationship -- confirmed by a
+    first run of this backtest where entropy correlated *negatively* with raw `cost`
+    pooled across positions (-0.195) despite a modestly *positive* correlation within
+    every individual position (QB +0.23, RB +0.37, WR +0.22, TE -0.05), a Simpson's
+    paradox from exactly this scale confound.
+
+    Normalizing didn't rescue the metric, though -- it exposed a second, unrelated
+    problem. Against `cost_frac`, the pooled correlation stayed negative (-0.153),
+    and the within-position correlations that looked positive against raw `cost`
+    flipped mostly negative too (QB -0.20, RB -0.35, WR -0.15, TE +0.10). That
+    reversal means the original within-position positive reading wasn't real
+    signal either: `value_now` and `entropy` both drift with pick depth (bigger
+    early, smaller/flatter late), so raw `cost` and entropy trended together purely
+    through depth as a lurking variable, not through any real relationship to each
+    other. Once the target is normalized to remove that drift, entropy doesn't help
+    -- if anything it points the wrong way.
+    """
+    from . import board as bd
+    from . import model
+    from .config import LeagueSettings, ModelWeights
+
+    league = league or LeagueSettings()
+    weights = weights or ModelWeights()
+    sc_label = "ppr" if float(league.scoring.rec) >= 0.9 else \
+               "half_ppr" if float(league.scoring.rec) >= 0.35 else "standard"
+    window = window or league.teams
+
+    rows = []
+    for season in seasons:
+        try:
+            tbl = model.build_player_table(league, weights, season=season)
+            proj = model.project(tbl, league, weights)
+            adp = bd.load_adp(season=season)
+            proj = bd.attach_adp(proj, adp)
+            board = bd.convert_adp_format(proj, sc_label)
+        except Exception as exc:
+            print(f"  ! {season}: {type(exc).__name__}: {exc}")
+            continue
+
+        ordered = board.sort_values("adp").reset_index(drop=True)
+        last_i = min(cutoff, len(ordered) - window) - 1
+        if last_i < 1:
+            print(f"  ! {season}: board too small for window={window}, cutoff={cutoff}")
+            continue
+
+        for i in range(0, last_i, stride):
+            current_pick, next_pick = i + 1, i + 1 + window
+            remaining = ordered.iloc[i:].copy()
+            future = ordered.iloc[i + window:]
+
+            remaining["p_available_next"] = model.survival_probability_vec(
+                remaining["adp"].to_numpy(), current_pick, next_pick)
+            expected_map = model.expected_best_at_next_pick(remaining)
+            entropy_map = model.position_scarcity_entropy(remaining)
+
+            for pos, chunk in remaining.groupby("position"):
+                if pos not in bd.POSITIONS or len(chunk) < 2:
+                    continue
+                top2 = chunk.nlargest(2, "draft_score")["draft_score"].tolist()
+                value_now, gap = top2[0], top2[0] - top2[1]
+
+                fut_pos = future[future["position"] == pos]
+                value_future = float(fut_pos["draft_score"].max()) if not fut_pos.empty else 0.0
+
+                implied_cost = max(0.0, value_now - expected_map.get(pos, 0.0))
+                cost = max(0.0, value_now - value_future)
+                frac = (lambda x: x / value_now) if value_now > 0 else (lambda x: 0.0)
+
+                rows.append({
+                    "season": season, "pick_idx": current_pick, "position": pos,
+                    "entropy": entropy_map.get(pos, 1.0), "pool_size": len(chunk),
+                    "raw_gap": gap, "raw_gap_frac": frac(gap),
+                    "implied_cost": implied_cost, "implied_cost_frac": frac(implied_cost),
+                    "cost": cost, "cost_frac": frac(cost),
+                })
+    return pd.DataFrame(rows)
+
+
+def position_scarcity_entropy_backtest_summary(hist: pd.DataFrame) -> dict:
+    """Score position_scarcity_entropy_backtest's output.
+
+    Scores against `cost_frac` (the drop as a fraction of the current best remaining
+    player's own draft_score), not raw `cost` -- positions don't share a draft_score
+    scale, so correlating a normalized target is what keeps this an honest test of
+    "does entropy predict the shape of the drop" instead of "which position happens
+    to score bigger" (see position_scarcity_entropy_backtest's docstring for the
+    Simpson's-paradox result that motivated this). raw_gap_frac and implied_cost_frac
+    are scored the same way for a fair comparison; pool_size is a plain count with no
+    natural scale to normalize by, so it's left as-is.
+
+    Every predictor is oriented so higher means "predicts a bigger drop": entropy is
+    reported as `1 - entropy` (a lumpier, more concentrated pool reads as higher
+    risk), pool_size is negated (fewer players left = more risk), and raw_gap_frac /
+    implied_cost_frac are already oriented that way.
+
+    A positive improvement_vs_* means entropy is catching real drop-off signal that
+    baseline misses. Near zero or negative means the simpler baseline -- or, for
+    improvement_vs_implied_cost, the survival-probability mechanism already live in
+    recommend() -- predicts the actual cost of waiting just as well, and -- same rule
+    position_run_backtest's result applied to PositionMarkov -- position_scarcity_entropy
+    shouldn't get wired into recommend()/draft_score.
+    """
+    if hist.empty:
+        return {"n_samples": 0}
+
+    def spearman(a, b):
+        return float(pd.Series(a).rank().corr(pd.Series(b).rank()))
+
+    entropy_risk = 1.0 - hist["entropy"]
+    pool_risk = -hist["pool_size"]
+    target = hist["cost_frac"]
+
+    entropy_corr = spearman(entropy_risk, target)
+    gap_corr = spearman(hist["raw_gap_frac"], target)
+    pool_corr = spearman(pool_risk, target)
+    implied_corr = spearman(hist["implied_cost_frac"], target)
+
+    return {
+        "n_samples": int(len(hist)),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "entropy_corr": entropy_corr,
+        "raw_gap_corr": gap_corr,
+        "pool_size_corr": pool_corr,
+        "implied_cost_corr": implied_corr,
+        "improvement_vs_raw_gap": entropy_corr - gap_corr,
+        "improvement_vs_pool_size": entropy_corr - pool_corr,
+        "improvement_vs_implied_cost": entropy_corr - implied_corr,
     }
 
 
@@ -616,6 +822,85 @@ def matchup_backtest_summary(hist: pd.DataFrame, top_n: int = 24) -> dict:
         "talent_only_top_n_precision": talent_prec,
         "matchup_adjusted_top_n_precision": matchup_prec,
         "improvement_precision": matchup_prec - talent_prec,
+    }
+
+
+def vacated_role_backtest(seasons: list[int], positions: tuple[str, ...] = ("WR", "TE"),
+                          min_games: int = 6) -> pd.DataFrame:
+    """Does knowing who already has volume tell you who benefits when a same-team,
+    same-position starter misses a game? The general version of the Chase-out/
+    Higgins-in question: not one hand-picked pair, but every real qualifying
+    absence in `seasons`.
+
+    Thin wrapper around features.vacated_role_events -- real box scores only, no
+    leak-free bound needed the way projection-based backtests need one, since this
+    is scoring a predictor (trailing target_share, using only weeks before the
+    absence) against a real historical outcome (the target_share teammates actually
+    posted that week), not projecting anything about a season that hasn't happened.
+    """
+    from . import features
+
+    w = sources.weekly_stats(seasons)
+    w = w[w["season_type"] == "REG"]
+    byes = {s: features.bye_weeks(s) for s in seasons}
+    return features.vacated_role_events(w, byes, positions=positions, min_games=min_games)
+
+
+def vacated_role_backtest_summary(hist: pd.DataFrame) -> dict:
+    """Score vacated_role_backtest's output two ways:
+
+    `trailing_share_vs_lift_corr`: Spearman correlation, pooled across every
+    teammate-event row, between trailing_share (the predictor) and share_lift (the
+    real redistribution that week). No cross-position scale confound to worry about
+    here the way position_scarcity_entropy_backtest had -- target_share is already
+    a common 0-1 scale, not an absolute draft_score that differs by position.
+
+    `top1_accuracy`: for each distinct absence (one team, one week, one player out),
+    does the teammate with the *highest* trailing_share also turn out to be the one
+    with the *biggest* actual share_lift that week? Compared against
+    `random_baseline_accuracy` (1/n_candidates, averaged per event) -- the chance
+    accuracy this many candidate teammates would produce by construction, since a
+    3-candidate race has an easier baseline to beat than a 5-candidate one.
+
+    A positive improvement_vs_random and a clearly positive corr together would mean
+    this is worth building into a live "who benefits if X sits" read. Same rule as
+    every other backtest this session: if it comes back weak, it stays a documented
+    finding, not a live feature. A 2021-2025 run (13,507 teammate-rows, 3,950
+    absences) found exactly that ambiguity: top1_accuracy barely beat the random
+    baseline (0.371 vs. 0.345, +0.025), while trailing_share_vs_lift_corr was
+    actually negative (-0.118) -- existing volume gives a slight edge at naming the
+    single biggest gainer, but doesn't track the size of anyone's bump, plausibly a
+    ceiling effect (a player already getting a lot of targets has less room left to
+    grow proportionally). Not clean enough to wire in.
+    """
+    if hist.empty:
+        return {"n_events": 0}
+
+    def spearman(a, b):
+        return float(pd.Series(a).rank().corr(pd.Series(b).rank()))
+
+    corr = spearman(hist["trailing_share"], hist["share_lift"])
+
+    hits, n_candidates = [], []
+    for _, ev in hist.groupby(["season", "team", "week", "player_out"]):
+        if len(ev) < 2:
+            continue
+        predicted = ev.loc[ev["trailing_share"].idxmax(), "teammate"]
+        actual_best = ev.loc[ev["share_lift"].idxmax(), "teammate"]
+        hits.append(predicted == actual_best)
+        n_candidates.append(len(ev))
+
+    accuracy = float(np.mean(hits)) if hits else float("nan")
+    random_baseline = float(np.mean([1.0 / n for n in n_candidates])) if n_candidates else float("nan")
+
+    return {
+        "n_teammate_rows": int(len(hist)),
+        "n_absence_events": len(hits),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "trailing_share_vs_lift_corr": corr,
+        "top1_accuracy": accuracy,
+        "random_baseline_accuracy": random_baseline,
+        "improvement_vs_random": accuracy - random_baseline,
     }
 
 

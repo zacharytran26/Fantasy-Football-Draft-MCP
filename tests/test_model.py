@@ -2,12 +2,15 @@
 import numpy as np
 import pandas as pd
 
-from ffdraft.board import FORMAT_SHIFT_DAMPING, convert_adp_format, synthetic_adp
+from ffdraft.board import FORMAT_SHIFT_DAMPING, attach_bye_weeks, convert_adp_format, synthetic_adp
 from ffdraft.config import LeagueSettings
 from ffdraft.model import (
+    HANDCUFF_BONUS,
     _positional_need,
     apply_current_team,
     expected_best_at_next_pick,
+    likely_alternative_by_position,
+    roster_construction_mult,
     survival_probability,
     survival_probability_vec,
     touchdown_luck_multiplier,
@@ -131,6 +134,18 @@ class TestCurrentTeam:
         out = apply_current_team(tbl, dc).set_index("player_id")
         assert out.loc["p1", "team"] == "NEW"
         assert out.loc["p2", "team"] == "SAME"
+
+    def test_depth_rank_carries_over_when_the_feed_has_it(self):
+        tbl = pd.DataFrame([{"player_id": "p1", "name": "Backup", "team": "OLD"}])
+        dc = pd.DataFrame([{"player_id": "p1", "team": "SF", "depth_rank": 2}])
+        out = apply_current_team(tbl, dc)
+        assert out.loc[0, "depth_rank"] == 2
+
+    def test_depth_rank_is_nan_when_the_feed_lacks_it(self):
+        tbl = pd.DataFrame([{"player_id": "p1", "name": "X", "team": "OLD"}])
+        dc = pd.DataFrame([{"player_id": "p1", "team": "NEW"}])
+        out = apply_current_team(tbl, dc)
+        assert out.loc[0, "depth_rank"] is None or pd.isna(out.loc[0, "depth_rank"])
 
 
 class TestTouchdownLuck:
@@ -275,3 +290,139 @@ class TestFormatConversion:
         b = self._board().drop(columns=[])
         out = convert_adp_format(b, "standard")
         assert out["adp"].equals(b["adp"])
+
+
+class TestByeWeekAttachment:
+    def test_maps_team_to_bye_via_features(self, monkeypatch):
+        import ffdraft.features as features_mod
+
+        monkeypatch.setattr(features_mod, "bye_weeks", lambda season=None: {"BUF": 7})
+        out = attach_bye_weeks(pd.DataFrame([{"name": "X", "team": "BUF"}]))
+        assert out.loc[0, "bye"] == 7
+
+    def test_missing_team_column_does_not_raise(self):
+        out = attach_bye_weeks(pd.DataFrame([{"name": "X"}]))
+        assert out["bye"].isna().all()
+
+
+class TestRosterConstructionMult:
+    # A small league (one starter per flex-eligible position, one FLEX) so the
+    # combined flex-eligible requirement is an easy-to-reason-about 4: RB(1) +
+    # WR(1) + TE(1) + FLEX(1).
+    _SMALL_LEAGUE = LeagueSettings(starters={"QB": 1, "RB": 1, "WR": 1, "TE": 1,
+                                             "FLEX": 1, "K": 0, "DST": 0})
+
+    def test_healthy_depth_absorbs_a_lone_bye_with_no_discount(self):
+        # 4 flex-eligible players already owned (meets the requirement on its own,
+        # with real depth), none sharing the candidate's bye -- adding a 5th on a
+        # bye nobody else has still leaves 4 healthy for 4 required slots.
+        avail = pd.DataFrame([{"position": "WR", "team": "MIA", "bye": 6, "draft_score": 50.0}])
+        owned = pd.DataFrame([
+            {"position": "RB", "team": "BUF", "bye": 1, "draft_score": 80.0},
+            {"position": "RB", "team": "KC", "bye": 1, "draft_score": 40.0},
+            {"position": "WR", "team": "SF", "bye": 1, "draft_score": 60.0},
+            {"position": "TE", "team": "DAL", "bye": 1, "draft_score": 30.0},
+        ])
+        out = roster_construction_mult(avail, owned, self._SMALL_LEAGUE)
+        assert out["bye_mult"].iloc[0] == 1.0
+
+    def test_zero_cushion_roster_shows_a_modest_shortfall_even_alone(self):
+        # Exactly at the required depth (4) with zero bench cushion -- even a bye
+        # week nobody else shares still leaves the roster one body short that week.
+        avail = pd.DataFrame([{"position": "WR", "team": "MIA", "bye": 6, "draft_score": 50.0}])
+        owned = pd.DataFrame([
+            {"position": "RB", "team": "BUF", "bye": 1, "draft_score": 80.0},
+            {"position": "WR", "team": "SF", "bye": 1, "draft_score": 60.0},
+            {"position": "TE", "team": "DAL", "bye": 1, "draft_score": 30.0},
+        ])
+        out = roster_construction_mult(avail, owned, self._SMALL_LEAGUE)
+        assert out["bye_mult"].iloc[0] == 0.85
+
+    def test_a_real_bye_week_collision_is_a_severe_discount(self):
+        # 3 of the (exactly-4-required) flex-eligible players already share the
+        # candidate's bye week -- a real, severe shortfall, not just thin depth.
+        avail = pd.DataFrame([{"position": "WR", "team": "MIA", "bye": 6, "draft_score": 50.0}])
+        owned = pd.DataFrame([
+            {"position": "RB", "team": "BUF", "bye": 6, "draft_score": 80.0},
+            {"position": "WR", "team": "SF", "bye": 6, "draft_score": 60.0},
+            {"position": "TE", "team": "DAL", "bye": 6, "draft_score": 30.0},
+        ])
+        out = roster_construction_mult(avail, owned, self._SMALL_LEAGUE)
+        assert out["bye_mult"].iloc[0] == 0.40
+
+    def test_team_exposure_discounts_heavy_stacking(self):
+        avail = pd.DataFrame([{"position": "WR", "team": "BUF", "bye": 12, "draft_score": 50.0}])
+        owned = pd.DataFrame([
+            {"position": "RB", "team": "BUF", "bye": 12, "draft_score": 80.0},
+            {"position": "QB", "team": "BUF", "bye": 12, "draft_score": 70.0},
+        ])
+        out = roster_construction_mult(avail, owned)
+        assert out["exposure_mult"].iloc[0] == 0.95
+
+    def test_handcuff_bonus_for_a_clear_backup_running_back(self):
+        """No depth_rank column at all -- the value-proxy fallback, same behavior
+        as before real depth-chart data was wired in."""
+        avail = pd.DataFrame([{"position": "RB", "team": "SF", "bye": 9, "draft_score": 20.0}])
+        owned = pd.DataFrame([{"position": "RB", "team": "SF", "bye": 9, "draft_score": 90.0}])
+        out = roster_construction_mult(avail, owned)
+        assert out["handcuff_mult"].iloc[0] == HANDCUFF_BONUS
+
+    def test_no_handcuff_bonus_when_candidate_outscores_your_own_starter(self):
+        """A same-team, same-position player who beats your own starter is a
+        competing option, not insurance -- no bonus (value-proxy fallback)."""
+        avail = pd.DataFrame([{"position": "RB", "team": "SF", "bye": 9, "draft_score": 95.0}])
+        owned = pd.DataFrame([{"position": "RB", "team": "SF", "bye": 9, "draft_score": 90.0}])
+        out = roster_construction_mult(avail, owned)
+        assert out["handcuff_mult"].iloc[0] == 1.0
+
+    def test_depth_chart_calls_a_real_handcuff_even_when_value_disagrees(self):
+        # Candidate actually projects HIGHER than the rostered starter -- the
+        # value-proxy fallback would have called this a lateral, not insurance --
+        # but the real depth chart clearly lists him RB2 behind your own RB1.
+        avail = pd.DataFrame([{"position": "RB", "team": "SF", "bye": 9,
+                              "draft_score": 95.0, "depth_rank": 2}])
+        owned = pd.DataFrame([{"position": "RB", "team": "SF", "bye": 9,
+                              "draft_score": 90.0, "depth_rank": 1}])
+        out = roster_construction_mult(avail, owned)
+        assert out["handcuff_mult"].iloc[0] == HANDCUFF_BONUS
+
+    def test_depth_chart_gives_no_bonus_to_a_co_starter(self):
+        # Both backs are listed as rank 1 on the real depth chart (a true
+        # committee) -- no bonus, whatever the value gap between them, since the
+        # depth chart itself doesn't call this one a backup to the other.
+        avail = pd.DataFrame([{"position": "RB", "team": "SF", "bye": 9,
+                              "draft_score": 40.0, "depth_rank": 1}])
+        owned = pd.DataFrame([{"position": "RB", "team": "SF", "bye": 9,
+                              "draft_score": 45.0, "depth_rank": 1}])
+        out = roster_construction_mult(avail, owned)
+        assert out["handcuff_mult"].iloc[0] == 1.0
+
+    def test_handcuff_does_not_apply_outside_running_back(self):
+        avail = pd.DataFrame([{"position": "WR", "team": "SF", "bye": 9, "draft_score": 20.0}])
+        owned = pd.DataFrame([{"position": "WR", "team": "SF", "bye": 9, "draft_score": 90.0}])
+        out = roster_construction_mult(avail, owned)
+        assert out["handcuff_mult"].iloc[0] == 1.0
+
+    def test_empty_roster_is_a_no_op(self):
+        avail = pd.DataFrame([{"position": "WR", "team": "SF", "bye": 9, "draft_score": 20.0}])
+        out = roster_construction_mult(avail, None)
+        assert (out == 1.0).all().all()
+
+
+class TestLikelyAlternative:
+    def test_names_the_best_survivor_at_even_odds(self):
+        avail = pd.DataFrame([
+            {"position": "RB", "name": "Elite", "draft_score": 100.0, "adp": 3.0},
+            {"position": "RB", "name": "Solid", "draft_score": 60.0, "adp": 40.0},
+        ])
+        out = likely_alternative_by_position(avail, current_pick=10, next_pick=20)
+        assert out["RB"]["name"] == "Solid"
+        assert out["RB"]["likely"] is True
+
+    def test_falls_back_to_best_chance_when_nobody_clears_even_odds(self):
+        # adp=5 is long gone by pick 10, and waiting the full 20 picks to pick 30
+        # only makes that more certain -- no survivor clears even odds.
+        avail = pd.DataFrame([{"position": "QB", "name": "Only", "draft_score": 50.0, "adp": 5.0}])
+        out = likely_alternative_by_position(avail, current_pick=10, next_pick=30)
+        assert out["QB"]["name"] == "Only"
+        assert out["QB"]["likely"] is False

@@ -187,8 +187,17 @@ _TEAM_CODE_FIX = {
 }
 
 
+# The feed also carries defensive and special-teams rows (formations like "Base
+# 4-3 D", return units, etc.), and ~7% of players show up under more than one of
+# these on a given snapshot -- a WR who's also the kick returner, for instance.
+# Restricting to skill positions before dedup avoids picking up his return-unit
+# slot instead of his real offensive one; this app only models these four anyway.
+_DEPTH_CHART_POSITIONS = ("QB", "RB", "WR", "TE")
+
+
 def depth_charts(season: int | None = None) -> pd.DataFrame:
-    """Each player's current NFL team, from the official team-filed depth charts.
+    """Each player's current NFL team and depth-chart slot, from the official
+    team-filed depth charts.
 
     Weekly box-score stats only update a player's team once he's actually played a
     game for it, so trades, cuts and free-agent signings are invisible until Week 1
@@ -197,20 +206,23 @@ def depth_charts(season: int | None = None) -> pd.DataFrame:
     catch a move as soon as a team reports it. Refreshed daily (max_age_days=1),
     since August roster churn is fast.
 
-    Returns columns [player_id, team]; empty DataFrame if the season's depth chart
-    isn't published yet (very early offseason) rather than raising, since this is a
-    "nice if available" override, not a hard dependency.
+    Returns columns [player_id, team, depth_rank] (1 = starter, per the official
+    chart); empty DataFrame if the season's depth chart isn't published yet (very
+    early offseason) rather than raising, since this is a "nice if available"
+    override, not a hard dependency. depth_rank is NaN wherever the feed doesn't
+    carry a rank column at all.
     """
     from .config import CURRENT_SEASON
     season = season or CURRENT_SEASON
     key = f"depth_charts_{season}"
 
     def build():
+        empty = pd.DataFrame(columns=["player_id", "team", "depth_rank"])
         try:
             df = pd.read_parquet(NFLVERSE + f"/depth_charts/depth_charts_{season}.parquet")
         except Exception as exc:
             print(f"  ! no depth chart published yet for {season}: {type(exc).__name__}")
-            return pd.DataFrame(columns=["player_id", "team"])
+            return empty
         # Column names have varied across nflverse depth_chart schema versions.
         if "team" not in df.columns and "club_code" in df.columns:
             df["team"] = df["club_code"]
@@ -218,14 +230,20 @@ def depth_charts(season: int | None = None) -> pd.DataFrame:
             df["player_id"] = df["gsis_id"]
         if "player_id" not in df.columns or "team" not in df.columns:
             print("  ! depth chart missing expected columns, skipping team override")
-            return pd.DataFrame(columns=["player_id", "team"])
+            return empty
+        if "pos_abb" in df.columns:
+            df = df[df["pos_abb"].isin(_DEPTH_CHART_POSITIONS)]
         df = df.dropna(subset=["player_id", "team"]).copy()
         df["team"] = df["team"].astype("string").str.upper().replace(_TEAM_CODE_FIX)
-        # Keep each player's most recent report (highest week = latest depth chart).
-        sort_cols = [c for c in ("week",) if c in df.columns]
+        df["depth_rank"] = df["pos_rank"] if "pos_rank" in df.columns else pd.NA
+        # Keep each player's most recent report. Schema has varied between a
+        # season-long feed with a "week" column and a rolling feed stamped with a
+        # "dt" scrape timestamp instead -- sort by whichever exists so keep='last'
+        # actually keeps the latest report rather than an arbitrary row order.
+        sort_cols = [c for c in ("dt", "week") if c in df.columns]
         if sort_cols:
             df = df.sort_values(sort_cols)
-        return df.drop_duplicates("player_id", keep="last")[["player_id", "team"]]
+        return df.drop_duplicates("player_id", keep="last")[["player_id", "team", "depth_rank"]]
 
     return _cached(key, build, max_age_days=1.0)
 

@@ -206,6 +206,25 @@ def attach_adp(board: pd.DataFrame, adp: pd.DataFrame | None) -> pd.DataFrame:
     return b
 
 
+def attach_bye_weeks(board: pd.DataFrame, season: int | None = None) -> pd.DataFrame:
+    """Join each player's team's bye week onto the board, from features.bye_weeks.
+
+    A missing team or an unpublished schedule reads as no bye rather than raising --
+    recommend()'s bye-collision check treats a missing bye as "can't collide with
+    anything," the conservative default (same posture attach_adp takes when real ADP
+    is missing for a player).
+    """
+    from . import features
+
+    b = board.copy()
+    if "team" not in b.columns:
+        b["bye"] = np.nan
+        return b
+    byes = features.bye_weeks(season)
+    b["bye"] = b["team"].map(byes)
+    return b
+
+
 def convert_adp_format(board: pd.DataFrame, scoring_label: str) -> pd.DataFrame:
     """Shift PPR consensus rankings into this league's scoring format.
 
@@ -336,6 +355,23 @@ class DraftState:
                 counts[pos] = counts.get(pos, 0) + 1
         return counts
 
+    def my_roster_players(self, board: pd.DataFrame) -> pd.DataFrame:
+        """Full rows (not just position counts) for players on your own roster --
+        what recommend()'s bye-collision/team-exposure/handcuff checks need, since
+        those depend on WHICH players you own (team, bye week), not just how many
+        per position."""
+        if "_key" not in board.columns or not self.picks:
+            return board.iloc[0:0]
+        mine_keys = {norm_name(p["name"]) for p in self.picks if p["slot"] == self.my_slot}
+        return board[board["_key"].isin(mine_keys)]
+
+    def upcoming_picks(self, after: int | None = None, n: int = 3) -> list[int]:
+        """Your own next `n` picks from `after` onward (inclusive), overall pick
+        numbers -- the lookahead horizon who_should_i_pick/plan_my_draft use for
+        multi-turn "is it safe to wait" reasoning."""
+        after = after if after is not None else self.on_the_clock
+        return [p for p in self.my_picks() if p >= after][:n]
+
     def recent_positions(self, board: pd.DataFrame, n: int = 1) -> list[str]:
         """Position of the last `n` picks, most recent last -- the state a
         PositionMarkov transition is conditioned on."""
@@ -375,10 +411,15 @@ class PositionMarkov:
     against simply guessing that season's most common position (marginal frequency:
     accuracy 0.389 vs. Markov's 0.376, logloss improvement -0.004) -- the transition
     structure isn't adding real signal over "WR gets picked most, so guess WR." Same
-    conclusion redzone_shift_backtest reached for the red-zone identity factor: stays
-    a sketch, not wired into who_should_i_pick or draft_score, unless real completed
-    draft order (fed via from_sequences instead of the ECR-order proxy) tells a
-    different story.
+    conclusion redzone_shift_backtest reached for the red-zone identity factor.
+
+    This isn't just a proxy artifact, either: adp.real_draft_position_run_backtest
+    re-ran the identical test on one real league's actual 2021-2025 draft order
+    (from_sequences, not from_adp_order) and found the same wash against marginal
+    frequency (694 real transitions; accuracy -0.010, logloss +0.0005, both
+    essentially zero). Positional runs genuinely aren't more predictable than base
+    rates in that room, so the ECR-order proxy wasn't hiding a real signal it
+    couldn't see. Stays a sketch, not wired into who_should_i_pick or draft_score.
     """
 
     def __init__(self, prior_counts: pd.DataFrame | None = None, smoothing: float = 1.0):
@@ -545,6 +586,40 @@ def sync_espn(league_id: str, season: int = CURRENT_SEASON,
             "player_id": None,
         })
     return sorted([o for o in out if o["overall"]], key=lambda o: o["overall"])
+
+
+def resolve_pick_positions(picks: list[dict], season: int) -> list[str]:
+    """Position-of-pick sequence for a real completed draft, in original pick
+    order -- what real_draft_position_run_backtest (adp.py) needs, resolved from
+    sync_espn/sync_sleeper's raw picks (which carry a name but not a position)
+    against that season's real box scores.
+
+    D/ST picks (sync_espn encodes them as "{team} D/ST") and any name that doesn't
+    resolve to a real skill-position player that season (a bust who never played a
+    game, a name mismatch the fuzzy matcher can't close) are dropped rather than
+    guessed -- same posture as everywhere else in this app that K/DST go
+    unmodelled.
+    """
+    w = sources.weekly_stats([season])
+    w = w[w["position"].isin(POSITIONS) & (w["season_type"] == "REG")]
+    lookup = (w[["player_display_name", "position"]]
+             .rename(columns={"player_display_name": "name"})
+             .drop_duplicates("name"))
+    if lookup.empty:
+        return []
+    lookup["_key"] = lookup["name"].map(norm_name)
+
+    out = []
+    for p in sorted(picks, key=lambda p: p["overall"]):
+        name = p["name"]
+        if name.endswith("D/ST"):
+            continue
+        row, _ = match_player_verbose(name, lookup)
+        if row is None:
+            print(f"  ! could not resolve '{name}' to a {season} skill-position player")
+            continue
+        out.append(row["position"])
+    return out
 
 
 # ESPN's lineupSlotCounts slot ids that count as a flex, and which positions each
