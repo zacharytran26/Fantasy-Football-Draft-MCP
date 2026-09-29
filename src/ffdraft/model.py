@@ -580,13 +580,14 @@ def recommend(board: pd.DataFrame, league: LeagueSettings, current_pick: int,
     avail["bye_mult"] = rc["bye_mult"].to_numpy()
     avail["exposure_mult"] = rc["exposure_mult"].to_numpy()
     avail["handcuff_mult"] = rc["handcuff_mult"].to_numpy()
+    avail["injury_mult"] = rc["injury_mult"].to_numpy()
 
     # A small share of raw value is retained so a truly generational player still
     # rises even when his position is deep behind him.
     avail["pick_value"] = (
         (0.80 * avail["marginal_value"] + 0.20 * avail["draft_score"])
         * avail["need_mult"] * avail["bye_mult"]
-        * avail["exposure_mult"] * avail["handcuff_mult"]
+        * avail["exposure_mult"] * avail["handcuff_mult"] * avail["injury_mult"]
     )
     return avail.sort_values("pick_value", ascending=False).head(top_n)
 
@@ -732,6 +733,19 @@ BYE_SHORTFALL_DECAY = {1: 0.85, 2: 0.60, 3: 0.40}
 # a scheme change, coordinator firing or O-line injury can tank several of your
 # players in the same week, a correlated-bust risk raw draft_score can't see.
 TEAM_EXPOSURE_DECAY = {2: 0.95, 3: 0.85, 4: 0.70}
+# Discount keyed on how many starting slots' worth of season-average healthy
+# availability a position group would be short (see _injury_shortfall). Milder
+# than BYE_SHORTFALL_DECAY since this is a probabilistic season-long risk (several
+# fragile players might all stay healthy), not a guaranteed single-week collision.
+# Half-integer thresholds, not whole ones like BYE_SHORTFALL_DECAY's -- bye
+# shortfall is inherently an integer (a whole player either is or isn't on a given
+# bye), but this one averages exp_games across the season, so a shortfall of 2.9
+# and 3.4 are genuinely different risk levels and rounding both to 3 before
+# scoring would blur exactly the distinction this check exists to make (it did,
+# in an earlier version -- a durable and a fragile candidate landed in the same
+# bucket and scored identically).
+INJURY_SHORTFALL_DECAY = {0.5: 0.95, 1.0: 0.90, 1.5: 0.83, 2.0: 0.75,
+                         2.5: 0.65, 3.0: 0.55, 3.5: 0.45, 4.0: 0.35}
 # Bonus for a player who reads as the backup (same team, same position) to someone
 # already on your roster -- insurance value: losing your starter hands this player
 # the touches on the same offense. Real handcuffing is a running-back-specific
@@ -741,9 +755,11 @@ HANDCUFF_BONUS = 1.15
 HANDCUFF_ELIGIBLE = {"RB"}
 
 
-def _tiered_mult(count: int, table: dict[int, float]) -> float:
+def _tiered_mult(count: float, table: dict[float, float]) -> float:
     """The decay for the highest threshold in `table` that `count` meets or beats,
-    else 1.0 (no effect) -- shared by the bye-shortfall and team-exposure checks."""
+    else 1.0 (no effect) -- shared by the bye-shortfall, team-exposure, and
+    injury-shortfall checks. `count` and `table`'s keys can be int or float;
+    injury-shortfall uses half-integer thresholds since its input is continuous."""
     mult = 1.0
     for threshold in sorted(table):
         if count >= threshold:
@@ -751,20 +767,17 @@ def _tiered_mult(count: int, table: dict[int, float]) -> float:
     return mult
 
 
-def _bye_shortfall(position: str, bye, roster_players: pd.DataFrame,
-                   league: LeagueSettings) -> int:
-    """How many starting slots would go unfilled the week `bye` falls, if a player
-    at `position` with that bye joined the roster -- 0 if the roster (plus this
-    candidate) still covers every starter at that position group that week.
+def _position_group_requirement(position: str, league: LeagueSettings) -> tuple[tuple[str, ...], int]:
+    """The position group and required-starter count a roster-depth check should
+    use for `position` -- shared by _bye_shortfall and _injury_shortfall, since
+    both ask "is there enough healthy depth to fill starting lineup slots," just
+    on different timescales (one calendar week vs. the season average).
 
-    Checked against the combined FLEX-eligible group (RB/WR/TE plus the FLEX slot)
-    rather than the exact position alone, since a thin RB week can be covered by an
-    extra rostered WR/TE in the FLEX slot and vice versa. QB folds in the
-    superflex slot count the same way _positional_need does, since a second
-    required QB only exists in superflex.
+    FLEX-eligible positions (RB/WR/TE) are pooled together plus the FLEX slot,
+    since a thin RB week/season can be covered by an extra rostered WR/TE and vice
+    versa. QB folds in the superflex slot count the same way _positional_need
+    does, since a second required QB only exists in superflex.
     """
-    if bye is None or pd.isna(bye) or not {"position", "bye"}.issubset(roster_players.columns):
-        return 0
     if position in league.flex_eligible:
         group = league.flex_eligible
         required = sum(league.starters.get(p, 0) for p in group) + league.starters.get("FLEX", 0)
@@ -774,34 +787,78 @@ def _bye_shortfall(position: str, bye, roster_players: pd.DataFrame,
     else:
         group = (position,)
         required = league.starters.get(position, 0)
+    return group, required
+
+
+def _bye_shortfall(position: str, bye, roster_players: pd.DataFrame,
+                   league: LeagueSettings) -> int:
+    """How many starting slots would go unfilled the week `bye` falls, if a player
+    at `position` with that bye joined the roster -- 0 if the roster (plus this
+    candidate) still covers every starter at that position group that week.
+    """
+    if bye is None or pd.isna(bye) or not {"position", "bye"}.issubset(roster_players.columns):
+        return 0
+    group, required = _position_group_requirement(position, league)
     pool = roster_players[roster_players["position"].isin(group)]
     total_owned = len(pool) + 1  # + this candidate
     on_bye = int((pool["bye"] == bye).sum()) + 1  # + this candidate
     return max(0, required - (total_owned - on_bye))
 
 
+def _injury_shortfall(position: str, exp_games, roster_players: pd.DataFrame,
+                      league: LeagueSettings) -> float:
+    """How many starting slots' worth of healthy availability, averaged across the
+    season, a position group would be short if a player with `exp_games` expected
+    games available (out of 17, already computed in project() from injury_risk)
+    joined the roster -- a season-long, probabilistic analogue of _bye_shortfall's
+    single-calendar-week check.
+
+    Reuses exp_games rather than re-deriving anything: total expected healthy
+    player-games across the group (owned players plus this candidate), divided by
+    17 for a season-average headcount, compared against how many starters the
+    group needs to fill every week. A roster with plenty of individually-healthy
+    depth at a position shows no shortfall even if one player is fragile; a roster
+    that's stacked several high-injury-risk players at a thin position -- a risk
+    neither bye_mult (calendar-based) nor exposure_mult (same-team-based) catches
+    -- does.
+    """
+    if exp_games is None or pd.isna(exp_games) or \
+            not {"position", "exp_games"}.issubset(roster_players.columns):
+        return 0.0
+    group, required = _position_group_requirement(position, league)
+    pool = roster_players[roster_players["position"].isin(group)]
+    total_exp_games = float(pool["exp_games"].fillna(0.0).sum()) + float(exp_games)
+    avg_available = total_exp_games / 17.0
+    return max(0.0, required - avg_available)
+
+
 def roster_construction_mult(avail: pd.DataFrame, roster_players: pd.DataFrame | None,
                              league: LeagueSettings | None = None) -> pd.DataFrame:
     """Per-candidate multipliers driven by who's already on your roster: bye-week
-    lineup shortfalls, real-team exposure, and handcuff insurance value.
+    lineup shortfalls, real-team exposure, handcuff insurance value, and
+    positional injury-fragility stacking.
 
     Unlike PositionMarkov or position_scarcity_entropy, this doesn't need its own
     backtest before being trusted -- it isn't forecasting anything about the draft
-    or the season, it's deterministic bookkeeping over players you already own, the
-    same category _positional_need's need_mult already falls into.
+    or the season, it's deterministic bookkeeping over players you already own (and,
+    for injury_mult, an existing already-relied-upon model output -- exp_games --
+    not a new predictive claim), the same category _positional_need's need_mult
+    already falls into.
 
-    Returns a DataFrame of `bye_mult` / `exposure_mult` / `handcuff_mult` columns
-    aligned to avail's index, all 1.0 when roster_players is empty or missing the
-    columns (`team`, `bye`, `position`, `draft_score`, `depth_rank`) a check needs --
-    a league or board without bye-week data (schedule not published yet), team
-    data, or a published depth chart just skips that one check rather than raising.
-    `league` defaults to a generic LeagueSettings() when omitted, since the bye
-    check needs starter counts to know what a "shortfall" even means.
+    Returns a DataFrame of `bye_mult` / `exposure_mult` / `handcuff_mult` /
+    `injury_mult` columns aligned to avail's index, all 1.0 when roster_players is
+    empty or missing the columns (`team`, `bye`, `position`, `draft_score`,
+    `depth_rank`, `exp_games`) a check needs -- a league or board without bye-week
+    data (schedule not published yet), team data, or a published depth chart just
+    skips that one check rather than raising. `league` defaults to a generic
+    LeagueSettings() when omitted, since the bye and injury checks need starter
+    counts to know what a "shortfall" even means.
     """
     league = league or LeagueSettings()
     n = len(avail)
     out = pd.DataFrame({"bye_mult": np.ones(n), "exposure_mult": np.ones(n),
-                        "handcuff_mult": np.ones(n)}, index=avail.index)
+                        "handcuff_mult": np.ones(n), "injury_mult": np.ones(n)},
+                       index=avail.index)
     if roster_players is None or roster_players.empty:
         return out
 
@@ -810,6 +867,13 @@ def roster_construction_mult(avail: pd.DataFrame, roster_players: pd.DataFrame |
             lambda r: _tiered_mult(
                 _bye_shortfall(r["position"], r.get("bye"), roster_players, league),
                 BYE_SHORTFALL_DECAY),
+            axis=1)
+
+    if "exp_games" in avail.columns and {"position", "exp_games"}.issubset(roster_players.columns):
+        out["injury_mult"] = avail.apply(
+            lambda r: _tiered_mult(
+                _injury_shortfall(r["position"], r.get("exp_games"), roster_players, league),
+                INJURY_SHORTFALL_DECAY),
             axis=1)
 
     if "team" in roster_players.columns and "team" in avail.columns:
@@ -940,4 +1004,7 @@ def explain(row: pd.Series) -> str:
     hm = row.get("handcuff_mult")
     if hm is not None and np.isfinite(hm) and hm > 1.02:
         bits.append(f"handcuff value behind your own {row.get('team', '')} RB".rstrip())
+    im = row.get("injury_mult")
+    if im is not None and np.isfinite(im) and im < 0.97:
+        bits.append(f"thin, injury-prone depth at {row.get('position', '')} ({im:.2f}x)")
     return "; ".join(bits)

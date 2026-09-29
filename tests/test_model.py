@@ -350,6 +350,67 @@ class TestRosterConstructionMult:
         out = roster_construction_mult(avail, owned, self._SMALL_LEAGUE)
         assert out["bye_mult"].iloc[0] == 0.40
 
+    def test_healthy_depth_shows_no_injury_shortfall(self):
+        # 4 durable flex-eligible players (exp_games near the 17-game max) already
+        # meet the requirement on their own -- adding a durable 5th shows no
+        # fragility discount.
+        avail = pd.DataFrame([{"position": "WR", "exp_games": 17.0, "draft_score": 50.0}])
+        owned = pd.DataFrame([
+            {"position": "RB", "exp_games": 17.0, "draft_score": 80.0},
+            {"position": "RB", "exp_games": 16.0, "draft_score": 40.0},
+            {"position": "WR", "exp_games": 17.0, "draft_score": 60.0},
+            {"position": "TE", "exp_games": 16.0, "draft_score": 30.0},
+        ])
+        out = roster_construction_mult(avail, owned, self._SMALL_LEAGUE)
+        assert out["injury_mult"].iloc[0] == 1.0
+
+    def test_fragile_roster_shows_a_moderate_injury_discount(self):
+        # 3 flex-eligible players each averaging ~10 of 17 games -- a real, if
+        # probabilistic, depth risk at a thin position.
+        avail = pd.DataFrame([{"position": "WR", "exp_games": 10.0, "draft_score": 50.0}])
+        owned = pd.DataFrame([
+            {"position": "RB", "exp_games": 10.0, "draft_score": 80.0},
+            {"position": "WR", "exp_games": 10.0, "draft_score": 60.0},
+            {"position": "TE", "exp_games": 10.0, "draft_score": 30.0},
+        ])
+        out = roster_construction_mult(avail, owned, self._SMALL_LEAGUE)
+        assert out["injury_mult"].iloc[0] == 0.83
+
+    def test_severely_fragile_roster_is_a_steep_injury_discount(self):
+        avail = pd.DataFrame([{"position": "WR", "exp_games": 5.0, "draft_score": 50.0}])
+        owned = pd.DataFrame([
+            {"position": "RB", "exp_games": 5.0, "draft_score": 80.0},
+            {"position": "WR", "exp_games": 5.0, "draft_score": 60.0},
+            {"position": "TE", "exp_games": 5.0, "draft_score": 30.0},
+        ])
+        out = roster_construction_mult(avail, owned, self._SMALL_LEAGUE)
+        assert out["injury_mult"].iloc[0] == 0.65
+
+    def test_differentiates_a_durable_from_a_fragile_candidate_past_saturation(self):
+        # Regression check for the bug the smoke test caught: rounding the
+        # continuous shortfall to a whole slot collapsed two genuinely different
+        # risk levels (2.9 vs 3.4) into the same bucket, scoring a durable and a
+        # fragile candidate identically. A bigger, more realistic league (RB2/WR2/
+        # TE1/FLEX1 = required 6) exercises exactly that gap.
+        league = LeagueSettings(teams=10)
+        owned = pd.DataFrame([
+            {"position": "RB", "exp_games": 9.0, "draft_score": 70.0},
+            {"position": "RB", "exp_games": 10.0, "draft_score": 50.0},
+            {"position": "WR", "exp_games": 17.0, "draft_score": 60.0},
+        ])
+        avail = pd.DataFrame([
+            {"position": "RB", "exp_games": 17.0, "draft_score": 54.0},  # durable
+            {"position": "RB", "exp_games": 8.0, "draft_score": 55.0},   # fragile
+        ])
+        out = roster_construction_mult(avail, owned, league)
+        assert out["injury_mult"].iloc[0] > out["injury_mult"].iloc[1]
+
+    def test_missing_exp_games_column_is_a_no_op(self):
+        avail = pd.DataFrame([{"position": "WR", "draft_score": 50.0}])
+        owned = pd.DataFrame([{"position": "RB", "draft_score": 80.0}])
+        out = roster_construction_mult(avail, owned, self._SMALL_LEAGUE)
+        assert out["injury_mult"].iloc[0] == 1.0
+
     def test_team_exposure_discounts_heavy_stacking(self):
         avail = pd.DataFrame([{"position": "WR", "team": "BUF", "bye": 12, "draft_score": 50.0}])
         owned = pd.DataFrame([
