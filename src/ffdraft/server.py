@@ -753,7 +753,10 @@ def position_run_backtest(seasons: str = "2021,2022,2023,2024,2025") -> str:
     run continues" (+0.054 accuracy), but is a wash against just guessing that
     season's most common position (marginal frequency: -0.004 logloss, -0.013
     accuracy) -- the transition structure adds nothing over "WR gets picked most, so
-    guess WR." Re-run this if the underlying proxy or model changes.
+    guess WR." A block-bootstrap 95% CI on the logloss gap over marginal came back
+    entirely negative (-0.0073 to -0.0005) -- not noise straddling zero, but a
+    small, real edge *for* marginal frequency specifically on this ECR-order proxy.
+    Re-run this if the underlying proxy or model changes.
 
     Caveat worth repeating: this tests whether consensus-rank position order
     generalizes season to season, not whether it predicts real human draft-room
@@ -767,12 +770,17 @@ def position_run_backtest(seasons: str = "2021,2022,2023,2024,2025") -> str:
     if hist.empty:
         return json.dumps({"error": "no position-run backtest data available for those seasons"})
     summary = adp_mod.position_run_backtest_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.position_run_backtest_summary,
+                              ["improvement_logloss_vs_marginal", "improvement_accuracy_vs_marginal"])
     return json.dumps({
         "summary": summary,
+        "confidence_intervals": ci,
         "interpretation": (
             "logloss: lower is better, improvement = baseline_logloss - markov_logloss; "
             "accuracy: share of transitions where the top-1 prediction matched the "
-            "actual next position"
+            "actual next position; confidence_intervals are 95% block-bootstrap "
+            "intervals over seasons -- lo/hi straddling zero means the point estimate "
+            "could plausibly be noise"
         ),
     }, indent=2, default=str)
 
@@ -798,9 +806,12 @@ def real_draft_position_run_backtest(league_id: str,
     marginal frequency on logloss (+0.0005, essentially zero) and slightly *worse*
     than it on accuracy (-0.010). Positional runs, at least in that room, genuinely
     aren't more predictable than base rates -- the proxy wasn't hiding a real
-    signal. Small-sample caveat: one league's five drafts is only a few hundred
-    transitions, thinner than a market-order proxy across many more "seasons" can
-    offer, so treat any given league's result as a read on that room specifically.
+    signal. The bootstrap CI on the logloss gap actually straddles zero here
+    (-0.0084 to +0.0097) -- genuine noise on real draft order, unlike the
+    ECR-proxy version's CI, which stayed entirely negative. Small-sample caveat:
+    one league's five drafts is only a few hundred transitions, thinner than a
+    market-order proxy across many more "seasons" can offer, so treat any given
+    league's result as a read on that room specifically.
     """
     yrs = [int(s) for s in seasons.split(",") if s.strip()]
     sequences: dict[int, list[str]] = {}
@@ -820,15 +831,20 @@ def real_draft_position_run_backtest(league_id: str,
                                     "-- check the league id and ESPN_SWID/ESPN_S2"})
     hist = adp_mod.real_draft_position_run_backtest(sequences)
     summary = adp_mod.position_run_backtest_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.position_run_backtest_summary,
+                              ["improvement_logloss_vs_marginal", "improvement_accuracy_vs_marginal"])
     return json.dumps({
         "league_id": league_id,
         "seasons_used": sorted(sequences.keys()),
         "picks_resolved_per_season": {s: len(seq) for s, seq in sequences.items()},
         "summary": summary,
+        "confidence_intervals": ci,
         "interpretation": (
             "logloss: lower is better, improvement = baseline_logloss - markov_logloss; "
             "accuracy: share of transitions where the top-1 prediction matched the "
-            "actual next position"
+            "actual next position; confidence_intervals are 95% block-bootstrap "
+            "intervals over seasons -- with only a handful of real drafts to "
+            "resample, expect these to be wide"
         ),
     }, indent=2, default=str)
 
@@ -867,20 +883,27 @@ def position_scarcity_entropy_backtest(seasons: str = "2021,2022,2023,2024,2025"
     (value_now and entropy both drift with it) driving both variables together, not
     real signal. expected_best_at_next_pick's own survival-probability estimate --
     already live in recommend() -- predicts the real drop far better on its own
-    (implied_cost_corr 0.606) than entropy does.
+    (implied_cost_corr 0.606) than entropy does. Block-bootstrap 95% CIs confirm
+    both aren't noise: entropy_corr's CI is entirely negative (-0.223 to -0.075),
+    and improvement_vs_implied_cost's is even more decisively so (-0.840 to
+    -0.677) -- entropy losing to the live mechanism is a real, reliable gap.
     """
     yrs = [int(s) for s in seasons.split(",") if s.strip()]
     hist = adp_mod.position_scarcity_entropy_backtest(yrs)
     if hist.empty:
         return json.dumps({"error": "no position-scarcity backtest data available for those seasons"})
     summary = adp_mod.position_scarcity_entropy_backtest_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.position_scarcity_entropy_backtest_summary,
+                              ["entropy_corr", "improvement_vs_implied_cost"])
     return json.dumps({
         "summary": summary,
+        "confidence_intervals": ci,
         "interpretation": (
             "all correlations are Spearman rank correlation against the actual "
             "draft_score drop as a fraction of the current best player's own "
             "draft_score; improvement_vs_X = entropy_corr - X_corr, positive means "
-            "entropy predicts the drop better than X"
+            "entropy predicts the drop better than X; confidence_intervals are 95% "
+            "block-bootstrap intervals over seasons"
         ),
     }, indent=2, default=str)
 
@@ -913,9 +936,15 @@ def vacated_role_backtest(seasons: str = "2021,2022,2023,2024,2025",
     (a ceiling effect) even on the occasions he is the top gainer. This matches the
     hand-checked Chase/Higgins result that motivated building this (two absences,
     one real bump, one no-show) -- it wasn't a small-sample fluke, it's genuinely
-    this noisy at scale. Not clean enough to wire into recommend()/draft_score or a
-    live "who benefits" score; treat any single real-world case (like Chase/Higgins)
-    as anecdotal, not a reliable read.
+    this noisy at scale. Block-bootstrap 95% CIs sharpen this into two different,
+    both-real findings rather than one muddy one: trailing_share_vs_lift_corr's CI
+    is entirely negative (-0.139 to -0.095) -- reliably fails to track bump *size*
+    -- while top1_accuracy and improvement_vs_random's CIs never dip below zero
+    across resamples (0.371-0.488 and 0.025-0.293) -- a small but real edge at
+    naming *who*, just not one worth trusting for *how much*. Not clean enough to
+    wire into recommend()/draft_score or a live "who benefits" score either way;
+    treat any single real-world case (like Chase/Higgins) as anecdotal, not a
+    reliable read.
     """
     yrs = [int(s) for s in seasons.split(",") if s.strip()]
     pos = tuple(p.strip().upper() for p in positions.split(",") if p.strip())
@@ -923,15 +952,19 @@ def vacated_role_backtest(seasons: str = "2021,2022,2023,2024,2025",
     if hist.empty:
         return json.dumps({"error": "no vacated-role backtest data available for those seasons/positions"})
     summary = adp_mod.vacated_role_backtest_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.vacated_role_backtest_summary,
+                              ["trailing_share_vs_lift_corr", "top1_accuracy", "improvement_vs_random"])
     return json.dumps({
         "positions": list(pos),
         "summary": summary,
+        "confidence_intervals": ci,
         "interpretation": (
             "trailing_share_vs_lift_corr: Spearman correlation, pooled across every "
             "teammate-row, between pre-absence volume and the actual target-share "
             "bump; top1_accuracy: share of absences where the highest-trailing-share "
             "teammate was also the biggest actual gainer, vs. random_baseline_accuracy "
-            "(1/n_candidates, averaged per absence)"
+            "(1/n_candidates, averaged per absence); confidence_intervals are 95% "
+            "block-bootstrap intervals over seasons"
         ),
     }, indent=2, default=str)
 
@@ -962,6 +995,62 @@ def draft_backtest(league_id: str, season: int, top_n: int = 3) -> str:
     """
     out = adp_mod.draft_backtest(league_id, season, top_n=top_n)
     return json.dumps(out, indent=2, default=str)
+
+
+@mcp.tool()
+def multi_season_draft_backtest(league_id: str, seasons: str = "2021,2022,2023,2024,2025",
+                                top_n: int = 3) -> str:
+    """Is the live model actually ready? Runs draft_backtest across every season
+    given and aggregates: across every real pick you made, would the algorithm's
+    recommendation (the exact mechanism who_should_i_pick uses live) have scored
+    more than what you actually took, using real box scores from those seasons?
+
+    Unlike the other backtests in this app, this isn't testing whether some new,
+    unvalidated signal (PositionMarkov, position_scarcity_entropy, vacated-role
+    insurance) should be added -- those were all tested and rejected earlier. This
+    tests the live model exactly as it stands today, against your own real draft
+    history. `algo_beats_your_pick_rate` is the most direct answer: the share of
+    real picks where the algorithm's pick would have outscored yours.
+    `algo_pct_of_optimal` / `your_pct_of_optimal` show both against the true
+    hindsight-best ceiling (100% would mean matching it every single pick).
+
+    confidence_intervals are 95% block-bootstrap intervals over seasons, same
+    method as every other backtest here -- with only a handful of real drafts to
+    resample, expect these to be wide, and a CI that straddles zero for
+    algo_improvement_over_you_per_pick means "plausibly no real edge," not proof
+    either way. Check early_rounds_improvement_per_pick vs.
+    late_rounds_improvement_per_pick too, not just the flat overall average: a
+    real run (one league, 2021-2025, 53 picks) found the overall gap statistically
+    inconclusive (CI -19.1 to +1.6) but a stark structure underneath it --
+    the algorithm clearly outperformed in rounds 1-6 (+36.6 pts/pick) and clearly
+    underperformed in rounds 7+ (-67.8 pts/pick). A flat aggregate would have
+    hidden a real late-round weakness behind solid early-round performance.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    hist = adp_mod.multi_season_draft_backtest(league_id, yrs, top_n=top_n)
+    if hist.empty:
+        return json.dumps({"error": "no draft backtest data available -- check the league id, "
+                                    "ESPN_SWID/ESPN_S2, and that a draft exists for those seasons"})
+    summary = adp_mod.multi_season_draft_backtest_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.multi_season_draft_backtest_summary,
+                              ["algo_beats_your_pick_rate", "algo_improvement_over_you_per_pick",
+                               "algo_pct_of_optimal", "early_rounds_improvement_per_pick",
+                               "late_rounds_improvement_per_pick"])
+    return json.dumps({
+        "league_id": league_id,
+        "summary": summary,
+        "confidence_intervals": ci,
+        "interpretation": (
+            "algo_beats_your_pick_rate: share of real picks where the algorithm's "
+            "recommendation outscored what you actually took; algo_improvement_over_"
+            "you_per_pick: average points/pick the algorithm would have added; "
+            "early/late_rounds_improvement_per_pick: the same split before/after "
+            "early_late_cutoff (default round 6) -- check this before trusting the "
+            "flat overall average, which can hide an early/late split; "
+            "algo_pct_of_optimal / your_pct_of_optimal: both totals as a fraction of "
+            "the true hindsight-best (100% = matched it every pick)"
+        ),
+    }, indent=2, default=str)
 
 
 @mcp.tool()

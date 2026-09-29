@@ -9,6 +9,8 @@ Source: dynastyprocess/data, which mirrors FantasyPros ECR history.
 """
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 import pandas as pd
 
@@ -450,6 +452,70 @@ def redzone_shift_backtest(seasons: list[int], position: str = "WR",
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def bootstrap_ci(hist: pd.DataFrame, summary_fn: Callable[[pd.DataFrame], dict],
+                 metrics: list[str], n_boot: int = 1000, seed: int = 0,
+                 group_col: str = "season") -> dict[str, dict]:
+    """95% confidence intervals for backtest summary metrics, shared by every
+    backtest in this module.
+
+    Every backtest here has been reporting bare point estimates -- "entropy_corr
+    -0.153," "top1_accuracy 0.371 vs. 0.345" -- with no way to tell whether a gap
+    like that is real or just noise from having only a handful of seasons/absences
+    to test on. This puts an actual interval around each headline number.
+
+    Resamples the distinct groups in `hist` (seasons, by default -- every backtest
+    in this module already carries a `season` column) WITH replacement, keeping
+    the same count as the original, rebuilds a hist from those groups' rows, and
+    recomputes `summary_fn` on it -- `n_boot` times. This is a *block* bootstrap
+    over whole seasons rather than individual rows, since transitions/events within
+    the same season aren't independent of each other; resampling rows directly
+    would understate the real uncertainty. It's cheap because none of these
+    summary_fns refit anything -- they aggregate numbers the backtest already
+    computed per row, so this is pure resampling and arithmetic, safe to run on
+    every call rather than as a separate opt-in step.
+
+    Returns, per metric, {"point": <value on the real data>, "lo": <2.5th
+    percentile>, "hi": <97.5th percentile>} -- lo/hi are None when there are
+    fewer than 2 groups to resample, or fewer than 10 usable bootstrap draws for
+    that metric (e.g. it's undefined whenever a resample happens to be missing a
+    denominator).
+
+    Caveat worth keeping in mind when reading the interval: with as few as 4-5
+    seasons (typical here), this measures how much the reported number could
+    plausibly swing given the seasons actually observed -- necessarily a wide
+    interval -- not whether the effect would replicate in some future, unseen
+    room or season. A CI that straddles zero means "this could easily be noise,"
+    not "there is definitely no effect."
+    """
+    groups = hist[group_col].unique() if group_col in hist.columns else []
+    point = summary_fn(hist)
+    if len(groups) < 2:
+        return {m: {"point": point.get(m), "lo": None, "hi": None} for m in metrics}
+
+    rng = np.random.default_rng(seed)
+    by_group = {g: hist[hist[group_col] == g] for g in groups}
+    draws: dict[str, list[float]] = {m: [] for m in metrics}
+    for _ in range(n_boot):
+        sample_groups = rng.choice(groups, size=len(groups), replace=True)
+        resampled = pd.concat([by_group[g] for g in sample_groups], ignore_index=True)
+        s = summary_fn(resampled)
+        for m in metrics:
+            v = s.get(m)
+            if v is not None and isinstance(v, (int, float)) and np.isfinite(v):
+                draws[m].append(float(v))
+
+    out = {}
+    for m in metrics:
+        vals = draws[m]
+        if len(vals) < 10:
+            out[m] = {"point": point.get(m), "lo": None, "hi": None}
+        else:
+            out[m] = {"point": point.get(m),
+                      "lo": float(np.percentile(vals, 2.5)),
+                      "hi": float(np.percentile(vals, 97.5))}
+    return out
+
+
 def position_run_backtest(seasons: list[int], smoothing: float = 1.0) -> pd.DataFrame:
     """Does board.PositionMarkov predict the next pick's position better than
     baselines that ignore the current one?
@@ -562,6 +628,9 @@ def real_draft_position_run_backtest(sequences: dict[int, list[str]],
     essentially zero) and slightly *worse* than it on accuracy (-0.010). Positional
     runs, at least in this room, genuinely aren't more predictable than base rates
     -- it isn't that the ADP-order proxy failed to capture something real.
+    bootstrap_ci on the logloss gap actually straddles zero here (-0.0084 to
+    +0.0097) -- genuine noise on real draft order, distinct from the ECR-proxy
+    version's CI, which stayed entirely negative (see position_run_backtest).
     """
     return _position_run_leave_one_out(sequences, smoothing)
 
@@ -660,7 +729,8 @@ def position_scarcity_entropy_backtest(seasons: list[int], league=None, weights=
     early, smaller/flatter late), so raw `cost` and entropy trended together purely
     through depth as a lurking variable, not through any real relationship to each
     other. Once the target is normalized to remove that drift, entropy doesn't help
-    -- if anything it points the wrong way.
+    -- if anything it points the wrong way. bootstrap_ci confirms this isn't noise:
+    entropy_corr's 95% CI is entirely negative (-0.223 to -0.075).
     """
     from . import board as bd
     from . import model
@@ -871,7 +941,12 @@ def vacated_role_backtest_summary(hist: pd.DataFrame) -> dict:
     actually negative (-0.118) -- existing volume gives a slight edge at naming the
     single biggest gainer, but doesn't track the size of anyone's bump, plausibly a
     ceiling effect (a player already getting a lot of targets has less room left to
-    grow proportionally). Not clean enough to wire in.
+    grow proportionally). bootstrap_ci turns that "barely" into two distinct, both
+    real findings: trailing_share_vs_lift_corr's CI is entirely negative (-0.139 to
+    -0.095, a reliable failure at bump *size*), while top1_accuracy and
+    improvement_vs_random's CIs never cross zero (0.371-0.488, 0.025-0.293) -- a
+    small but real edge at *who*, just not *how much*. Not clean enough to wire in
+    either way.
     """
     if hist.empty:
         return {"n_events": 0}
@@ -1180,6 +1255,96 @@ def draft_backtest(league_id: str, season: int, platform: str = "espn",
             "optimal_points": round(optimal_total, 1),
         },
         "rounds": rows,
+    }
+
+
+def multi_season_draft_backtest(league_id: str, seasons: list[int],
+                                top_n: int = 3) -> pd.DataFrame:
+    """Runs draft_backtest across many real seasons and compiles a row per real
+    pick you made: your actual points, what the live algorithm (recommend(), the
+    exact mechanism who_should_i_pick uses) would have taken instead and its real
+    points, and the true hindsight-optimal pick's real points.
+
+    This is the concrete "is the tool actually ready" check the other backtests
+    this session weren't: those tested whether a *new, unvalidated* signal
+    (PositionMarkov, position_scarcity_entropy, vacated-role insurance) should be
+    added on top of the live model. This instead asks whether the live model
+    itself, as it already stands, would have beaten what you actually drafted,
+    using real outcomes from real past drafts in your own league.
+
+    K/DST rounds are excluded (draft_backtest reports `your_points: None` for
+    them, since neither position is modelled). A season draft_backtest can't
+    replay (no ESPN draft found, credentials missing, league didn't exist that
+    year) is skipped with a printed note rather than failing the whole run.
+    """
+    rows = []
+    for season in seasons:
+        try:
+            out = draft_backtest(league_id, season, top_n=top_n)
+        except Exception as exc:
+            print(f"  ! {season}: {type(exc).__name__}: {exc}")
+            continue
+        if "error" in out:
+            print(f"  ! {season}: {out['error']}")
+            continue
+        for r in out["rounds"]:
+            if r["your_points"] is None:
+                continue
+            rows.append({
+                "season": season, "round": r["round"], "overall": r["overall"],
+                "your_pick": r["your_pick"], "your_points": r["your_points"],
+                "algo_pick": r["algo_pick"], "algo_points": r["algo_points"] or 0.0,
+                "optimal_pick": r["optimal_pick"], "optimal_points": r["optimal_points"] or 0.0,
+            })
+    return pd.DataFrame(rows)
+
+
+def multi_season_draft_backtest_summary(hist: pd.DataFrame, early_late_cutoff: int = 6) -> dict:
+    """Score multi_season_draft_backtest's output: does the live algorithm
+    actually outscore what you drafted, and how close does either get to the true
+    hindsight-optimal?
+
+    `algo_beats_your_pick_rate` is the share of real picks where the algorithm's
+    recommendation would have scored more than what you actually took that round
+    -- the most direct "would this have helped" number. `algo_pct_of_optimal` /
+    `your_pct_of_optimal` put both totals on the same scale (100% would mean
+    matching the true hindsight-best every single pick, impossible in practice
+    but useful as a ceiling to measure the gap against).
+
+    Also splits `algo_improvement_over_you_per_pick` into rounds <= `early_late_cutoff`
+    and rounds after it. A real run (one league, 2021-2025, 53 picks) found the
+    *overall* gap statistically inconclusive from only 5 seasons (bootstrap 95% CI
+    -19.1 to +1.6, straddling zero) but a stark, clearly-signed structure hiding
+    underneath the noisy overall average: the algorithm clearly outperformed in
+    rounds 1-6 (+36.6 pts/pick) and clearly underperformed in rounds 7+ (-67.8
+    pts/pick) -- a real weakness in bench/late-round value-finding masked by
+    strong early-round performance when only the flat total is reported. Worth
+    checking this split specifically before trusting an aggregate number that
+    looks fine (or alarming) on its own.
+    """
+    if hist.empty:
+        return {"n_picks": 0}
+    optimal_sum = float(hist["optimal_points"].sum())
+    diff = hist["algo_points"] - hist["your_points"]
+    early = hist[hist["round"] <= early_late_cutoff]
+    late = hist[hist["round"] > early_late_cutoff]
+    return {
+        "n_picks": int(len(hist)),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "total_your_points": float(hist["your_points"].sum()),
+        "total_algo_points": float(hist["algo_points"].sum()),
+        "total_optimal_points": optimal_sum,
+        "algo_beats_your_pick_rate": float((hist["algo_points"] > hist["your_points"]).mean()),
+        "algo_pct_of_optimal": (float(hist["algo_points"].sum() / optimal_sum)
+                                if optimal_sum else float("nan")),
+        "your_pct_of_optimal": (float(hist["your_points"].sum() / optimal_sum)
+                                if optimal_sum else float("nan")),
+        "algo_improvement_over_you_per_pick": float(diff.mean()),
+        "early_late_cutoff": early_late_cutoff,
+        "early_rounds_improvement_per_pick": float(early["algo_points"].sub(early["your_points"]).mean())
+                                            if not early.empty else float("nan"),
+        "late_rounds_improvement_per_pick": float(late["algo_points"].sub(late["your_points"]).mean())
+                                           if not late.empty else float("nan"),
     }
 
 

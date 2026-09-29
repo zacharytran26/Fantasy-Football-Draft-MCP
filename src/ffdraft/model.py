@@ -682,9 +682,11 @@ def position_scarcity_entropy(avail: pd.DataFrame, top_k: int = 12) -> dict[str,
     against the raw, unnormalized drop looked modestly positive within every
     individual position, but that reading flipped negative once the target was
     normalized, because value_now and entropy both drift with pick depth and were
-    only ever moving together through that lurking variable. Same conclusion
-    redzone_shift_backtest and position_run_backtest each reached for their own
-    factor: this stays a sketch, not wired into recommend() or draft_score.
+    only ever moving together through that lurking variable. adp.bootstrap_ci
+    confirms this isn't noise either: entropy_corr's 95% CI is entirely negative
+    (-0.223 to -0.075). Same conclusion redzone_shift_backtest and
+    position_run_backtest each reached for their own factor: this stays a sketch,
+    not wired into recommend() or draft_score.
     """
     out: dict[str, float] = {}
     for pos, chunk in avail.groupby("position"):

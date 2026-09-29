@@ -419,7 +419,10 @@ class PositionMarkov:
     frequency (694 real transitions; accuracy -0.010, logloss +0.0005, both
     essentially zero). Positional runs genuinely aren't more predictable than base
     rates in that room, so the ECR-order proxy wasn't hiding a real signal it
-    couldn't see. Stays a sketch, not wired into who_should_i_pick or draft_score.
+    couldn't see -- confirmed by adp.bootstrap_ci, whose 95% CI on the real-draft
+    logloss gap straddles zero (-0.0084 to +0.0097), genuine noise, unlike the
+    ECR-proxy version's CI, which stayed entirely negative. Stays a sketch, not
+    wired into who_should_i_pick or draft_score.
     """
 
     def __init__(self, prior_counts: pd.DataFrame | None = None, smoothing: float = 1.0):
