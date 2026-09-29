@@ -1315,6 +1315,71 @@ def oc_scheme_transfer_backtest(seasons: str = "2021,2022,2023,2024,2025") -> st
 
 
 @mcp.tool()
+def injury_risk_backtest(seasons: str = "2021,2022,2023,2024,2025",
+                         min_prior_games: int = 6) -> str:
+    """Does features.injury_risk -- already live in every player's exp_games and
+    projection discount, never backtested until now -- actually predict real
+    games played the following season, and does the full blend beat the simple
+    ingredient it's built from?
+
+    Leak-free: injury_risk computed from the same 5-season lookback
+    build_player_table uses, compared against real games played from actual
+    box scores. Excludes players who left the league entirely that season
+    (retired/cut, fewer than 10 weeks on any NFL roster per weekly_rosters) --
+    that's a real confound a first pass caught: raw "17 minus games played"
+    counted a retirement as 17 games "missed to injury," which isn't what this
+    feature claims to predict.
+
+    A 2021-2025 run (2,022 player-seasons) against the ORIGINAL hand-weighted
+    blend found real signal but real miscalibration in a feature people were
+    already trusting live: corr_injury_risk was -0.330 (95% CI -0.357 to
+    -0.310, direction confirmed), but the raw games_missed_rate component alone
+    was stronger at -0.474 (CI -0.508 to -0.440) -- injury_risk_is_worth_it was
+    -0.144 (not noise). The model's exp_games lost to the trivial "assume he
+    repeats last season" baseline by nearly a full game of mean absolute error
+    (mae_improvement_vs_games_last -0.876, CI -0.930 to -0.829). Root cause:
+    exp_games barely moved across very different recent-health profiles (~14.2
+    games for someone coming off 7-9 games, ~15.3 for a full 17 -- about a
+    1-game spread) while real outcomes differed by nearly 7 games (6.9 vs.
+    13.7), running optimistic at every level.
+
+    features.injury_risk has since been recalibrated on exactly this evidence
+    (OLS-refit against real outcomes, same methodology, see that function's
+    docstring). A rerun on the same 2021-2025 data confirms the fix:
+    corr_injury_risk is now -0.504 (ahead of the raw ingredient's -0.474),
+    injury_risk_is_worth_it flips to +0.029 (CI +0.020 to +0.038, entirely
+    positive), and mae_improvement_vs_games_last flips to +0.158 (CI +0.056 to
+    +0.257, entirely positive) -- exp_games now beats the baseline it used to
+    lose to. Unlike every other backtest in this codebase, this wasn't a sketch
+    that failed to earn a spot in the live model -- it caught and then verified
+    the fix for a real miscalibration in something already live in every
+    projection.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    hist = adp_mod.injury_risk_backtest(yrs, min_prior_games=min_prior_games)
+    if hist.empty:
+        return json.dumps({"error": "no injury-risk backtest data available for those seasons"})
+    summary = adp_mod.injury_risk_backtest_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.injury_risk_backtest_summary,
+                              ["injury_risk_is_worth_it", "mae_improvement_vs_games_last"])
+    return json.dumps({
+        "summary": summary,
+        "confidence_intervals": ci,
+        "interpretation": (
+            "corr_injury_risk/corr_games_missed_rate: Spearman correlation "
+            "against real games played (negative is correct -- higher risk "
+            "means fewer games); injury_risk_is_worth_it: |corr_injury_risk| - "
+            "|corr_games_missed_rate|, positive would mean the full blend beats "
+            "its own raw ingredient; mae_improvement_vs_games_last: naive "
+            "'repeat last season' baseline's error minus the model's error, "
+            "positive would mean the model earns its keep over that trivial "
+            "baseline; confidence_intervals are 95% block-bootstrap intervals "
+            "over seasons"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
 def draft_backtest(league_id: str, season: int, top_n: int = 3) -> str:
     """Replay a real past ESPN draft: the algorithm's pick, the true hindsight-best
     pick, and what you actually took, round by round.

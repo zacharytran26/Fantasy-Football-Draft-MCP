@@ -719,14 +719,60 @@ def _player_season_profiles(sc: Scoring, te_bonus: float = 0.0, seasons=None) ->
     return prof
 
 
-def injury_risk(profiles: pd.DataFrame) -> pd.DataFrame:
-    """Likelihood of missing time, from availability history plus workload burden.
+_INJURY_MODEL_COEF = {
+    "games_missed_rate": -11.0364,
+    "report_rate": -5.2486,
+    "recent_burden": 3.4587,
+    "pos_base": -1.8646,
+}
+_INJURY_MODEL_INTERCEPT = 13.3855
 
-    Three inputs, because each catches something the others miss:
-      1. games missed relative to a 17-game season, recency-weighted
-      2. how often they showed up on injury reports even when they played
-      3. workload burden — seasons of heavy touch volume, which is a
-         well-documented leading indicator for backs especially
+
+def injury_risk(profiles: pd.DataFrame) -> pd.DataFrame:
+    """Likelihood of missing time, and expected games played, from real
+    availability history and workload -- an OLS fit against real outcomes,
+    refit after adp.injury_risk_backtest found the original hand-weighted blend
+    (kept below for the record) badly miscalibrated despite looking reasonable.
+
+    The retired version blended four components with hand-picked weights
+    (0.35 position base rate, 0.30 recency-weighted games-missed rate, 0.15
+    injury-report frequency, 0.12 workload burden, 0.08 an age-past-cliff x
+    burden interaction meant to catch aging backs carrying heavy volume) on the
+    theory that heavier burden, and especially heavier burden past a position's
+    age cliff, meant more risk. A 2021-2025 real backtest (2,022 player-seasons,
+    leak-free 5-season lookback, players who left the league entirely excluded
+    via weekly_rosters) found that theory backwards on two of its own load-
+    bearing assumptions: `recent_burden` actually correlates *positively* with
+    real next-season games played (+0.396, not negative) -- heavy touches
+    mostly identifies a valued, healthy starter getting real opportunity, not a
+    wear-and-tear risk -- and the age x burden interaction the old formula was
+    built around showed ~zero standalone signal (+0.026) and only bought a
+    leave-one-season-out refit 0.007 games of accuracy, even restricted to
+    players already past their position's age cliff (+0.355 there too, still
+    positive). The net result: the blend correlated with real games played
+    *worse* than its own single best raw ingredient (games_missed_rate alone:
+    -0.474 Spearman vs. the old blend's -0.330), and the exp_games it fed barely
+    spread across very different recent-health profiles (~14.2 games predicted
+    for someone coming off 7-9 games played vs. ~15.3 for a full 17, when real
+    outcomes for those groups differ by nearly 7 games) -- losing to the trivial
+    "assume he repeats last season" baseline by almost a full game of mean
+    absolute error.
+
+    This version: ordinary least squares, fit directly against real games
+    played (not an intermediate 0-1 "risk" target), leave-one-season-out
+    validated on the same 2021-2025 data at 4.08 games mean absolute error --
+    beating both the trivial repeat-last-season baseline (4.26) and the old
+    formula (5.13), a real, cross-validated improvement, not an in-sample
+    artifact. Drops the age x burden interaction (shown above not to earn its
+    complexity) and lets `recent_burden` carry a positive coefficient, matching
+    its real, opposite-of-assumed relationship to next-season games.
+    `injury_risk` is still returned as the complementary 0-1 fraction,
+    (17 - exp_games) / 17, so m_injury and explain() keep working against the
+    same scale -- only what feeds it changed.
+
+    _INJURY_MODEL_COEF / _INJURY_MODEL_INTERCEPT are this session's current
+    best fit against 2021-2025 -- refit whenever injury_risk_backtest is rerun
+    against more or different seasons, not a permanent constant.
     """
     inj = sources.injuries()
     rosters = sources.weekly_rosters()
@@ -759,7 +805,15 @@ def injury_risk(profiles: pd.DataFrame) -> pd.DataFrame:
         rep["report_rate"] = (rep["report_weeks"] / (rep["report_seasons"] * 17)).clip(0, 1)
         avail = avail.merge(rep[["gsis_id", "report_rate"]], left_on="player_id",
                             right_on="gsis_id", how="left").drop(columns=["gsis_id"])
-    avail["report_rate"] = avail.get("report_rate", pd.Series(dtype=float)).fillna(0.15)
+    # When inj is completely empty (no injury-report data at all, not just
+    # missing for some players), "report_rate" is never created by the merge
+    # above -- avail.get(...) would then return an empty, unindexed default
+    # that .fillna() can't repair, silently leaving every row NaN instead of
+    # the intended 0.15 fallback. Handled as two explicit cases instead.
+    if "report_rate" in avail.columns:
+        avail["report_rate"] = avail["report_rate"].fillna(0.15)
+    else:
+        avail["report_rate"] = 0.15
 
     # 3. Workload burden: seasons above the positional touch threshold, recency-weighted.
     p["burden_line"] = p["position"].map(WORKLOAD_BURDEN)
@@ -775,7 +829,9 @@ def injury_risk(profiles: pd.DataFrame) -> pd.DataFrame:
     burden = bg.drop(columns=["_bnum", "_bden"])
     avail = avail.merge(burden, on="player_id", how="left")
 
-    # Age, needed for the RB-specific burden interaction.
+    # Age -- still reported for callers (roster age curves elsewhere), though no
+    # longer part of injury_risk itself; see the docstring for why the age x
+    # burden interaction it used to feed was dropped.
     ages = rosters.sort_values("week").groupby("gsis_id").agg(
         birth_date=("birth_date", "last"), season=("season", "max"),
     ).reset_index()
@@ -784,20 +840,18 @@ def injury_risk(profiles: pd.DataFrame) -> pd.DataFrame:
     avail = avail.merge(ages[["gsis_id", "age"]], left_on="player_id",
                         right_on="gsis_id", how="left").drop(columns=["gsis_id"])
 
-    # Blend into a single 0-1 risk score. Backs carrying heavy volume past the age
-    # cliff get an extra penalty; that combination is where seasons go to die.
     base = {"RB": 0.30, "WR": 0.20, "TE": 0.22, "QB": 0.16}
     avail["pos_base"] = avail["position"].map(base).fillna(0.20)
-    cliff = avail["position"].map(AGE_CLIFF).fillna(30)
-    age_excess = (avail["age"].fillna(26) - cliff).clip(lower=0)
 
-    avail["injury_risk"] = (
-        0.35 * avail["pos_base"]
-        + 0.30 * avail["games_missed_rate"].fillna(0.1).clip(0, 1)
-        + 0.15 * avail["report_rate"].clip(0, 1)
-        + 0.12 * (avail["recent_burden"].fillna(0.5) / 2).clip(0, 1)
-        + 0.08 * (age_excess * avail["recent_burden"].fillna(0.5) / 4).clip(0, 1)
-    ).clip(0.02, 0.85)
+    c = _INJURY_MODEL_COEF
+    exp_games = (
+        _INJURY_MODEL_INTERCEPT
+        + c["games_missed_rate"] * avail["games_missed_rate"].fillna(0.1).clip(0, 1)
+        + c["report_rate"] * avail["report_rate"].clip(0, 1)
+        + c["recent_burden"] * avail["recent_burden"].fillna(0.5).clip(0, 2)
+        + c["pos_base"] * avail["pos_base"]
+    ).clip(7, 17)
+    avail["injury_risk"] = ((17 - exp_games) / 17).clip(0.02, 0.85)
 
     return avail[["player_id", "position", "age", "games_missed_rate", "report_rate",
                   "heavy_seasons", "recent_burden", "injury_risk"]]

@@ -260,6 +260,21 @@ def build_player_table(league: LeagueSettings, weights: ModelWeights,
     return tbl
 
 
+def exp_games_from_injury_risk(injury_risk: pd.Series | float) -> pd.Series | float:
+    """Expected games out of 17, from features.injury_risk's 0-1 score.
+
+    A plain, undamped inverse: injury_risk is defined as the exact complementary
+    fraction of features.injury_risk's own OLS-fit exp_games, (17 - exp_games) /
+    17, so recovering exp_games needs no extra scaling factor. A single shared
+    function so project() and adp.injury_risk_backtest can't drift apart the way
+    they did once already -- the backtest kept a hardcoded copy of the old,
+    since-removed 0.62 damping factor after project() dropped it, silently
+    scoring the recalibrated formula against stale math until caught.
+    """
+    return (17 * (1 - injury_risk)).clip(7, 17) if hasattr(injury_risk, "clip") \
+        else max(7.0, min(17.0, 17 * (1 - injury_risk)))
+
+
 def project(tbl: pd.DataFrame, league: LeagueSettings, weights: ModelWeights) -> pd.DataFrame:
     """Turn features into a projection, a reliability score, and a draft value."""
     t = tbl.copy()
@@ -348,9 +363,8 @@ def project(tbl: pd.DataFrame, league: LeagueSettings, weights: ModelWeights) ->
     div = t["divisional_games"].fillna(6)
     t["m_divisional"] = 1 - w.divisional * ((div - 6) / 6 + 0.5) * (-sos_z.fillna(0).clip(-2, 2) / 2)
 
-    # Injury: expected games available out of 17. The risk score is a relative
-    # ranking, not a literal miss probability, so it's scaled before converting.
-    t["exp_games"] = (17 * (1 - t["injury_risk"] * 0.62)).clip(7, 17)
+    # Injury: expected games available out of 17.
+    t["exp_games"] = exp_games_from_injury_risk(t["injury_risk"])
     if is_rook.any() and "exp_games" in tbl.columns:
         # Rookie availability comes from draft capital, not injury history they
         # don't have yet.

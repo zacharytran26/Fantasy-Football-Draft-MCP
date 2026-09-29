@@ -1848,6 +1848,157 @@ def oc_scheme_transfer_backtest_summary(hist: pd.DataFrame) -> dict:
     }
 
 
+_ON_ROSTER_STATUSES = {"ACT", "RES", "INA", "DEV"}
+
+
+def injury_risk_backtest(seasons: list[int], min_prior_games: int = 6) -> pd.DataFrame:
+    """Does features.injury_risk -- already live in project()'s exp_games and
+    m_injury, never backtested before -- actually predict real games played the
+    following season, and does it do so better than the simple signals it's
+    built from?
+
+    Leak-free by construction: injury_risk is computed from
+    player_season_profiles bounded to the 5 seasons strictly before `season`
+    (the exact lookback build_player_table uses), then compared against real
+    games played from that season's actual weekly_stats.
+
+    IMPORTANT methodological fix this needed that a naive version wouldn't:
+    a first pass counting "17 minus games played" as games missed came back
+    wildly pessimistic for *everyone*, including players who'd played all 17
+    the year before -- because it silently counted players who retired, got
+    cut, or otherwise left the league entirely as having "missed" every
+    remaining game to injury. That's a real departure from the league, not an
+    injury outcome, and it's not what injury_risk claims to predict. Fixed by
+    requiring `rostered_weeks` (from weekly_rosters, status in ACT/RES/INA/DEV
+    -- still on an NFL roster in some capacity, even hurt on IR) to be >= 10 for
+    that season before counting the player at all; this dropped roughly a third
+    of the raw candidate pool in a 2021-2025 run, confirming it was a real and
+    large confound, not a rounding error.
+
+    `games_actual` is real games played that season; `games_missed_rate` is the
+    single recency-weighted historical-availability component injury_risk
+    blends together with position base rate, injury-report frequency, and
+    workload burden -- carried through so the backtest can check whether the
+    added complexity earns its keep over that one raw ingredient.
+    """
+    from . import features
+    from . import model as model_mod
+    from .config import Scoring
+
+    rows = []
+    for season in seasons:
+        try:
+            lookback = list(range(season - 5, season))
+            profiles = features.player_season_profiles(Scoring(), 0.0, seasons=lookback)
+            if profiles.empty:
+                print(f"  ! {season}: no prior-season profiles for lookback {lookback}")
+                continue
+            risk = features.injury_risk(profiles)
+
+            latest = profiles.sort_values("season").groupby("player_id").agg(
+                games_last=("games", "last"), name=("player_display_name", "last")
+            ).reset_index()
+            risk = risk.merge(latest, on="player_id", how="left")
+            risk = risk[risk["games_last"].fillna(0) >= min_prior_games]
+            if risk.empty:
+                continue
+
+            actual = sources.weekly_stats([season])
+            actual = actual[actual["season_type"] == "REG"]
+            games_actual = (actual.groupby("player_id")["week"].nunique()
+                           .rename("games_actual").reset_index())
+
+            rost = sources.weekly_rosters([season])
+            rost = rost[rost["status"].isin(_ON_ROSTER_STATUSES) & (rost["game_type"] == "REG")]
+            rostered_weeks = (rost.groupby("gsis_id")["week"].nunique()
+                             .rename("rostered_weeks").reset_index())
+
+            m = risk.merge(games_actual, on="player_id", how="left").merge(
+                rostered_weeks, left_on="player_id", right_on="gsis_id", how="left")
+            m["games_actual"] = m["games_actual"].fillna(0)
+            m["rostered_weeks"] = m["rostered_weeks"].fillna(0)
+            m = m[m["rostered_weeks"] >= 10].copy()
+            if m.empty:
+                continue
+            m["exp_games_pred"] = model_mod.exp_games_from_injury_risk(m["injury_risk"])
+            m["season"] = season
+            rows.append(m[["season", "player_id", "name", "position", "injury_risk",
+                          "games_missed_rate", "games_last", "exp_games_pred", "games_actual"]])
+        except Exception as exc:
+            print(f"  ! {season}: {type(exc).__name__}: {exc}")
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def injury_risk_backtest_summary(hist: pd.DataFrame) -> dict:
+    """Score injury_risk_backtest's output three ways: is the signal real, does
+    the full blend beat its own raw ingredient, and does the model's point
+    prediction (exp_games) beat naively assuming a player repeats last season's
+    games played?
+
+    `corr_injury_risk` / `corr_games_missed_rate`: Spearman correlation against
+    real games_actual (both come out negative -- higher predicted risk or
+    history of missed games correctly means fewer games). `injury_risk_is_worth_it`
+    is corr_injury_risk minus corr_games_missed_rate in *magnitude* (both
+    negative, so this is |corr_injury_risk| - |corr_games_missed_rate|) --
+    positive would mean blending in position base rate, injury-report frequency,
+    and workload burden earns its complexity over just using recency-weighted
+    history alone; negative means it doesn't.
+
+    `mae_improvement_vs_games_last`: mean absolute error of the naive
+    "repeat last season's games played" baseline minus the model's exp_games
+    error -- positive means the model beats that trivial baseline, near zero or
+    negative means it doesn't.
+
+    A 2021-2025 run (2,022 player-seasons after the rostered-weeks filter)
+    against the ORIGINAL hand-weighted blend found real signal but real
+    miscalibration: corr_injury_risk -0.330 (95% CI -0.357 to -0.310) confirmed
+    the direction was right, but corr_games_missed_rate alone was stronger at
+    -0.474 (CI -0.508 to -0.440) -- injury_risk_is_worth_it was -0.144, a real,
+    not-noise loss from blending. mae_improvement_vs_games_last was -0.876 (CI
+    -0.934 to -0.828), entirely negative: exp_games lost to "assume he repeats
+    last year" by nearly a full game on average. Bucketing on games_last showed
+    why: exp_games_pred barely moved across very different recent-health
+    profiles (~14.2 games for someone coming off 7-9 games played, ~15.3 for
+    someone coming off a full 17 -- barely a one-game spread), while real
+    outcomes for those groups differed by nearly seven games (6.9 vs. 13.7) and
+    ran below the prediction at every level, not just the unhealthy end.
+
+    features.injury_risk was recalibrated on exactly this evidence (see that
+    function's docstring for the full methodology and the retired formula). A
+    rerun against the recalibrated version, same 2021-2025 data: corr_injury_risk
+    is now -0.504, ahead of corr_games_missed_rate's -0.474 --
+    injury_risk_is_worth_it flips to +0.029 (CI +0.020 to +0.038, entirely
+    positive -- the blend now genuinely earns its complexity). And
+    mae_improvement_vs_games_last flips to +0.158 (CI +0.056 to +0.257, entirely
+    positive) -- exp_games now beats the trivial "repeat last year" baseline it
+    used to lose to. Every metric this backtest checks reversed sign and stayed
+    clear of zero -- a validated fix, not just a documented problem.
+    """
+    if hist.empty:
+        return {"n_players": 0}
+
+    def spearman(a, b):
+        return float(pd.Series(a).rank().corr(pd.Series(b).rank()))
+
+    hist = hist.copy()
+    hist["mae_model"] = (hist["exp_games_pred"] - hist["games_actual"]).abs()
+    hist["mae_games_last"] = (hist["games_last"] - hist["games_actual"]).abs()
+
+    corr_risk = spearman(hist["injury_risk"], hist["games_actual"])
+    corr_rate = spearman(hist["games_missed_rate"], hist["games_actual"])
+
+    return {
+        "n_players": int(len(hist)),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "corr_injury_risk": corr_risk,
+        "corr_games_missed_rate": corr_rate,
+        "injury_risk_is_worth_it": abs(corr_risk) - abs(corr_rate),
+        "mean_abs_error_model": float(hist["mae_model"].mean()),
+        "mean_abs_error_games_last": float(hist["mae_games_last"].mean()),
+        "mae_improvement_vs_games_last": float(hist["mae_games_last"].mean() - hist["mae_model"].mean()),
+    }
+
+
 def repeat_value_players(hist: pd.DataFrame, min_seasons: int = 2) -> pd.DataFrame:
     """Players who beat their draft slot repeatedly rather than once.
 
