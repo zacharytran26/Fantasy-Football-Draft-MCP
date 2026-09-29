@@ -1,9 +1,10 @@
 """Team-level context features: drive efficiency, red zone play-calling identity,
 and bye weeks."""
 import pandas as pd
+import pytest
 
 from ffdraft import features, sources
-from ffdraft.features import _redzone_identity_shift, _team_drive_efficiency
+from ffdraft.features import _neutral_script_pass_rate, _redzone_identity_shift, _team_drive_efficiency
 
 
 def _game(season, week, home, away, game_type="REG"):
@@ -40,6 +41,35 @@ class TestTeamDriveEfficiency:
         out = _team_drive_efficiency(pbp)
         assert out.empty
         assert "pct_td" in out.columns
+
+
+def _script_play(season, team, down, wp, is_pass):
+    return {"season": season, "posteam": team, "play_type": "pass" if is_pass else "run",
+           "pass": 1 if is_pass else 0, "down": down, "wp": wp}
+
+
+class TestNeutralScriptPassRate:
+    def test_excludes_garbage_time_and_late_downs(self):
+        pbp = pd.DataFrame([
+            # Neutral script: down 1-2, wp in [0.2, 0.8] -- 2 pass, 2 run.
+            _script_play(2025, "BUF", 1, 0.5, True),
+            _script_play(2025, "BUF", 2, 0.6, True),
+            _script_play(2025, "BUF", 1, 0.5, False),
+            _script_play(2025, "BUF", 2, 0.4, False),
+            # Garbage time (wp outside [0.2, 0.8]) -- excluded even though it's all passes.
+            _script_play(2025, "BUF", 1, 0.95, True),
+            _script_play(2025, "BUF", 1, 0.95, True),
+            # 3rd down -- excluded even though it's a run.
+            _script_play(2025, "BUF", 3, 0.5, False),
+        ])
+        out = _neutral_script_pass_rate(pbp)
+        row = out[(out["team"] == "BUF") & (out["season"] == 2025)].iloc[0]
+        assert row["pass_rate"] == pytest.approx(0.5)
+
+    def test_missing_team_season_absent_not_a_crash(self):
+        pbp = pd.DataFrame([_script_play(2025, "BUF", 1, 0.5, True)])
+        out = _neutral_script_pass_rate(pbp)
+        assert out[(out["team"] == "MIA")].empty
 
 
 class TestRedzoneIdentityShift:

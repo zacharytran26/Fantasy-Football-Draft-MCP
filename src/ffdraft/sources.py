@@ -97,12 +97,26 @@ def weekly_stats(seasons=None) -> pd.DataFrame:
     nflverse renamed this release from `player_stats` to `stats_player_week` starting
     with 2025, and dropped a few columns along the way. Both layouts are handled and
     normalised so the rest of the codebase sees one consistent schema.
+
+    Raises if ANY requested season fails to fetch, rather than silently returning
+    the seasons that did load. A multi-season call used to skip a failed season
+    with just a printed warning and cache whatever partial result it got --
+    caught for real when a transient nflverse fetch hiccup on one season inside a
+    2020-2025 pull produced a cached weekly_stats_2020_2025.parquet silently
+    missing all of 2022 (every team, not just one), which every caller
+    requesting that exact range would have kept getting for up to
+    max_age_days without any error. A clear failure here is much safer than a
+    silently incomplete lookback window feeding into a recency-weighted blend or
+    a backtest without anyone noticing -- callers that can tolerate a genuinely
+    unpublished season (a future one before it starts) already wrap this in
+    their own try/except per season, the same pattern used throughout adp.py.
     """
     seasons = seasons or SEASONS
     key = f"weekly_stats_{min(seasons)}_{max(seasons)}"
 
     def build():
         frames = []
+        missing = []
         for s in seasons:
             df = None
             for tmpl in (NFLVERSE + "/stats_player/stats_player_week_{season}.parquet",
@@ -113,11 +127,13 @@ def weekly_stats(seasons=None) -> pd.DataFrame:
                 except Exception:
                     continue
             if df is None:
-                print(f"  ! no weekly stats published for {s}")
+                missing.append(s)
                 continue
             frames.append(_normalise_weekly(df))
-        if not frames:
-            raise RuntimeError("no weekly stats loaded")
+        if missing:
+            raise RuntimeError(
+                f"weekly stats unavailable for season(s) {missing} -- refusing to "
+                f"cache a partial result for the requested range {min(seasons)}-{max(seasons)}")
         return pd.concat(frames, ignore_index=True)
 
     return _cached(key, build)

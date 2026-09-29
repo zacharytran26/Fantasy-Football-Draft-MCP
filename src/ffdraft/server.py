@@ -1266,6 +1266,55 @@ def oc_change_qb_efficiency_shrinkage_backtest(seasons: str = "2021,2022,2023,20
 
 
 @mcp.tool()
+def oc_scheme_transfer_backtest(seasons: str = "2021,2022,2023,2024,2025") -> str:
+    """Does an incoming offensive coordinator's own pass/run tendency at his
+    prior team predict his new team's actual pass rate better than just assuming
+    continuity from what the new team did the year before he arrived?
+
+    Motivated by oc_change_qb_efficiency_backtest's finding that a real OC change
+    makes a QB's efficiency less predictable, but not which way it moves -- if a
+    coach's own scheme identity travels with him between teams, that would be a
+    *directional* signal instead (bullish for RBs under a run-heavy hire, bullish
+    for WR/TE volume under a pass-heavy one), unlike the undirected QB finding.
+
+    IMPORTANT: only 12 real lateral OC-to-OC moves exist across 2021-2025 (most
+    coordinator turnover is either a first hire or a promotion to head coach
+    elsewhere -- neither traceable with this dataset). Every other backtest in
+    this codebase has 100+ observations; this has 12. Treat this as a first look,
+    not a settled answer.
+
+    A 2021-2025 run found no signal: the coach's own prior-team pass rate has
+    ~zero rank correlation with his new team's actual pass rate (Spearman 0.00),
+    while pure continuity is negatively correlated (-0.34, plausibly just
+    mean-reversion noise at n=12, not a real "fade last year" signal). By mean
+    absolute error, continuity actually beats the coach-identity predictor
+    (0.051 vs. 0.057), and the coach predictor only wins the head-to-head
+    comparison 4 of 12 times. Team personnel/context appears to dominate an
+    incoming playcaller's known tendency, at least on this metric -- a real,
+    well-motivated hypothesis that the available data doesn't support acting on.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    hist = adp_mod.oc_scheme_transfer_backtest(yrs)
+    if hist.empty:
+        return json.dumps({"error": "no lateral OC-to-OC moves landed in those seasons -- "
+                                    "see docs/oc_history_2020_2025.csv for what's covered"})
+    summary = adp_mod.oc_scheme_transfer_backtest_summary(hist)
+    return json.dumps({
+        "summary": summary,
+        "moves": hist[["coach", "from_team", "to_team", "season"]].to_dict("records"),
+        "interpretation": (
+            "coach_win_rate: share of moves where the incoming coach's own prior "
+            "pass rate predicted the new team's actual rate better than "
+            "continuity did, vs. 0.5 as a coin-flip baseline; "
+            "mae_improvement_vs_continuity: continuity's error minus the coach "
+            "predictor's error, positive would mean scheme-transfer is worth "
+            "building into projections; n=12 is too small for a bootstrap CI to "
+            "mean much, so none is reported here -- see the docstring's caveat"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
 def draft_backtest(league_id: str, season: int, top_n: int = 3) -> str:
     """Replay a real past ESPN draft: the algorithm's pick, the true hindsight-best
     pick, and what you actually took, round by round.

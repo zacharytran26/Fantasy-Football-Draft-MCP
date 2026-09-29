@@ -9,6 +9,7 @@ Source: dynastyprocess/data, which mirrors FantasyPros ECR history.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -1696,6 +1697,154 @@ def oc_change_qb_efficiency_shrinkage_summary(hist: pd.DataFrame,
         "improvement_vs_no_shrinkage_oc_same": improve_s,
         "improvement_is_coaching_specific": (improve_c - improve_s)
                                            if improve_c is not None and improve_s is not None else None,
+    }
+
+
+_OC_HISTORY_CSV_PATH = Path(__file__).resolve().parent.parent.parent / "docs" / "oc_history_2020_2025.csv"
+
+
+def _lateral_oc_moves() -> list[tuple[str, int, str, int, str]]:
+    """Real offensive-coordinator-to-offensive-coordinator moves: the same named
+    person holding the OC title at team A one season and a *different* team B the
+    next, mined from docs/oc_history_2020_2025.csv's already-cleaned
+    `offensive_coordinator` column.
+
+    Deliberately excludes the much more common case of a coordinator getting
+    promoted to head coach elsewhere (e.g. Ben Johnson: Detroit OC through 2024,
+    Chicago HC from 2025) -- that's a real playcaller move too, but the OC-title
+    dataset can't see it (see offensive_coordinator_changes's docstring), so
+    including it would silently undercount rather than help. Only lateral
+    OC-to-OC hires, where the title itself tracks the person continuously, are
+    usable here.
+
+    Returns (name, from_season, from_team, to_season, to_team) tuples. A 2020-2025
+    run of the underlying dataset finds 12 such moves -- a small, real sample, not
+    a large one; oc_scheme_transfer_backtest's docstring is explicit about what
+    that does and doesn't support concluding.
+    """
+    if not _OC_HISTORY_CSV_PATH.exists():
+        return []
+    df = pd.read_csv(_OC_HISTORY_CSV_PATH)
+    df = df[df["offensive_coordinator"].notna() & (df["offensive_coordinator"] != "")]
+    by_name: dict[str, dict[int, str]] = {}
+    for _, r in df.iterrows():
+        by_name.setdefault(r["offensive_coordinator"], {})[int(r["season"])] = r["team"]
+
+    moves = []
+    for name, by_season in by_name.items():
+        for y in sorted(by_season):
+            if (y - 1) in by_season and by_season[y - 1] != by_season[y]:
+                moves.append((name, y - 1, by_season[y - 1], y, by_season[y]))
+    return moves
+
+
+_SCHEME_TEAM_REMAP = {"LAR": "LA"}
+
+
+def oc_scheme_transfer_backtest(seasons: list[int]) -> pd.DataFrame:
+    """Does an incoming offensive coordinator's own pass/run tendency at his prior
+    team predict his new team's actual pass rate better than simply assuming the
+    new team keeps doing what it did the year before he arrived (continuity)?
+
+    Motivated directly by the coaching-change work this session already
+    validated for QB efficiency (oc_change_qb_efficiency_volatility): that found
+    a real OC change makes a QB's efficiency *less predictable*, but couldn't say
+    which way it would move. If a coach's own scheme identity travels with him,
+    that would be a *directional*, actionable signal instead -- bullish for a
+    team's RBs when a run-heavy playcaller arrives, bullish for its WR/TE volume
+    when a pass-heavy one does.
+
+    For every real lateral OC-to-OC move `_lateral_oc_moves` finds (coach X: team
+    A in season Y-1 -> team B in season Y) landing in `seasons`, using
+    features.neutral_script_pass_rate (score-script-neutral pass rate, real play
+    data, no leak-free bound needed since every input is real box scores from
+    seasons already played):
+      - `prior_source`: team A's pass rate in season Y-1 -- the coach's own,
+        most recent tendency, the new signal being tested
+      - `new_before`: team B's pass rate in season Y-1 -- what team B did the
+        year *before* he arrived, the continuity baseline
+      - `new_after`: team B's actual pass rate in season Y -- the real outcome
+
+    IMPORTANT sample-size caveat, sharper here than anywhere else in this
+    codebase: only 12 such moves exist across 2021-2025 (most coordinator
+    turnover is either a first-time hire or a promotion to head coach elsewhere,
+    neither of which this dataset can trace -- see _lateral_oc_moves). Every
+    other backtest here has at least 100+ observations; this has 12. Treat
+    anything found here as a plausible first look, not a settled answer the way
+    the QB efficiency volatility finding is.
+
+    A 2021-2025 run found no signal to act on: the coach's own prior tendency has
+    essentially zero rank correlation with the new team's actual pass rate
+    (Spearman 0.00), while pure continuity is *negatively* correlated (-0.34,
+    plausibly just mean-reversion noise at this sample size, not a real
+    "fade the prior year" signal). By mean absolute error, continuity actually
+    beats the coach-identity predictor (0.051 vs 0.057), and the coach predictor
+    only wins the individual-event comparison 4 of 12 times. The scheme-transfer
+    hypothesis is well-motivated but doesn't show up in the data available to
+    test it -- team personnel and context appear to dominate an incoming
+    playcaller's known tendency, at least on this simple metric.
+    """
+    from . import features
+
+    moves = [m for m in _lateral_oc_moves() if m[3] in seasons]
+    if not moves:
+        return pd.DataFrame()
+
+    needed = sorted({y for m in moves for y in (m[1], m[3])})
+    try:
+        pbp = sources.play_by_play(seasons=needed)
+    except Exception as exc:
+        print(f"  ! play-by-play unavailable for {needed}: {type(exc).__name__}: {exc}")
+        return pd.DataFrame()
+    rates = features.neutral_script_pass_rate(pbp)
+    rate_map = {(int(r["season"]), r["team"]): float(r["pass_rate"]) for _, r in rates.iterrows()}
+
+    def rate(season: int, team: str) -> float | None:
+        team = _SCHEME_TEAM_REMAP.get(team, team)
+        return rate_map.get((season, team))
+
+    rows = []
+    for name, ya, ta, yb, tb in moves:
+        prior_source, new_before, new_after = rate(ya, ta), rate(ya, tb), rate(yb, tb)
+        if prior_source is None or new_before is None or new_after is None:
+            continue
+        rows.append({
+            "coach": name, "from_team": ta, "to_team": tb, "season": yb,
+            "prior_source": prior_source, "new_before": new_before, "new_after": new_after,
+            "err_coach": abs(prior_source - new_after),
+            "err_continuity": abs(new_before - new_after),
+        })
+    return pd.DataFrame(rows)
+
+
+def oc_scheme_transfer_backtest_summary(hist: pd.DataFrame) -> dict:
+    """Score oc_scheme_transfer_backtest's output: does the incoming coach's own
+    pass-rate tendency (`prior_source`) predict the new team's actual pass rate
+    (`new_after`) better than continuity (`new_before`)?
+
+    `coach_win_rate`: share of individual moves where the coach-identity
+    predictor was closer to the real outcome than continuity was -- compared
+    against 0.5 (coin flip) rather than any bootstrap CI, since n=12 is too thin
+    for a stable resampled interval to mean much (see the backtest's docstring).
+    A positive `mae_improvement_vs_continuity` (continuity's error minus the
+    coach predictor's error) would mean the scheme-transfer idea is worth
+    building into projections; near zero or negative -- what the real run found
+    -- means it isn't, at least not on the evidence 12 real moves can supply.
+    """
+    if hist.empty:
+        return {"n_moves": 0}
+    def spearman(a, b):
+        return float(pd.Series(a).rank().corr(pd.Series(b).rank()))
+
+    return {
+        "n_moves": int(len(hist)),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "coach_win_rate": float(hist["err_coach"].lt(hist["err_continuity"]).mean()),
+        "mean_abs_error_coach": float(hist["err_coach"].mean()),
+        "mean_abs_error_continuity": float(hist["err_continuity"].mean()),
+        "mae_improvement_vs_continuity": float(hist["err_continuity"].mean() - hist["err_coach"].mean()),
+        "corr_prior_source_vs_actual": spearman(hist["prior_source"], hist["new_after"]),
+        "corr_continuity_vs_actual": spearman(hist["new_before"], hist["new_after"]),
     }
 
 

@@ -270,6 +270,33 @@ def _team_drive_efficiency(pbp: pd.DataFrame) -> pd.DataFrame:
     return out.drop(columns=["tds", "fgs", "punts"])
 
 
+def neutral_script_pass_rate(pbp: pd.DataFrame | None = None) -> pd.DataFrame:
+    """A team's pass rate with score-script noise stripped out, per season.
+
+    NOT the same thing as `_redzone_identity_shift`'s `neutral_pass_rate` column,
+    despite the similar name -- that one means "outside the red zone" (a
+    field-position filter). This one means "not obviously dictated by the
+    scoreboard": first or second down, and win probability between 20% and 80%
+    (excludes the trailing-team pass-more/leading-team run-more artifacts that
+    would otherwise swamp any real scheme signal). This is the standard
+    neutral-script definition used across public NFL analytics (e.g. nflfastR's
+    own PROE convention), used here specifically as the metric
+    adp.oc_scheme_transfer_backtest tests for whether a coach's own tendency
+    travels with him between teams.
+    """
+    if pbp is None:
+        return _memo("neutral_script_pass_rate", lambda: _neutral_script_pass_rate(sources.play_by_play()))
+    return _neutral_script_pass_rate(pbp)
+
+
+def _neutral_script_pass_rate(pbp: pd.DataFrame) -> pd.DataFrame:
+    off = pbp[pbp["posteam"].notna() & pbp["play_type"].isin(["pass", "run"])]
+    neutral = off[off["down"].isin([1, 2]) & off["wp"].between(0.2, 0.8)]
+    g = neutral.groupby(["season", "posteam"], observed=True)
+    out = (g["pass"].sum() / g["pass"].size().clip(lower=1)).rename("pass_rate").reset_index()
+    return out.rename(columns={"posteam": "team"})
+
+
 def redzone_identity_shift(pbp: pd.DataFrame | None = None) -> pd.DataFrame:
     """How much a team's pass rate drops once it crosses into the red zone.
 
