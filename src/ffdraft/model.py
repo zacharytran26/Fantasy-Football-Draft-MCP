@@ -581,6 +581,7 @@ def recommend(board: pd.DataFrame, league: LeagueSettings, current_pick: int,
     avail["exposure_mult"] = rc["exposure_mult"].to_numpy()
     avail["handcuff_mult"] = rc["handcuff_mult"].to_numpy()
     avail["injury_mult"] = rc["injury_mult"].to_numpy()
+    avail["oc_changed"] = attach_oc_change_flag(avail)
 
     # A small share of raw value is retained so a truly generational player still
     # rises even when his position is deep behind him.
@@ -834,6 +835,53 @@ def _injury_shortfall(position: str, exp_games, roster_players: pd.DataFrame,
     return max(0.0, required - avg_available)
 
 
+def attach_oc_change_flag(avail: pd.DataFrame, season: int = CURRENT_SEASON) -> pd.Series:
+    """True for a QB whose team enters `season` with a real offensive-coordinator
+    change -- an informational flag only, never a multiplier on pick_value.
+
+    adp.oc_change_qb_efficiency_volatility backtested this against 2021-2025 real
+    QB efficiency and found a genuine effect: a new play-caller predicts ~28%
+    bigger year-over-year EPA/dropback swings than continuity (95% CI entirely
+    positive, +0.0013 to +0.0497). But the follow-up
+    oc_change_qb_efficiency_shrinkage_backtest found no validated *directional*
+    correction -- the volatility is real but unsigned (a new OC can raise a QB's
+    efficiency, as it did for Caleb Williams, or lower it, as it did for Jared
+    Goff), so there's no evidence-backed way to turn it into a specific discount
+    or boost on draft_score. Surfacing it as a plain-language caveat in explain()
+    is the honest amount of "acting on" a real-but-undirected finding; silently
+    multiplying pick_value would imply a directional claim the backtest doesn't
+    support.
+
+    Only ever True for QB rows -- the backtest only tested QB efficiency, not
+    any other position. Always False if features.offensive_coordinator_changes
+    has no data for `season` (the underlying dataset is a static, manually
+    compiled file that needs a yearly refresh -- see that function's docstring)
+    or if `avail` has no `team`/`position` columns.
+
+    KNOWN LIMITATION, caught by a real 2026 example (Buffalo): this flags whoever
+    holds the OC *title* changing, not whether play-calling actually changed
+    hands. Joe Brady was Buffalo's OC in 2025 and was promoted to head coach for
+    2026, keeping play-calling duties himself; Pete Carmichael Jr. now holds the
+    OC title but isn't the play-caller. This flags Josh Allen anyway, because the
+    underlying dataset (and the Wikipedia sourcing behind the 2021-2025 backtest)
+    has no reliable way to distinguish "new OC hire, real scheme change" from
+    "internal promotion, same play-caller, title moved." That noise likely
+    attenuates the backtest's real effect size somewhat rather than inflating it
+    -- a title change that isn't a real scheme change should show *less* role
+    shift, not more, so it works against finding a positive result, not for it.
+    Treat a flagged QB as "coaching situation worth double-checking," not
+    "confirmed new scheme."
+    """
+    if not {"team", "position"}.issubset(avail.columns):
+        return pd.Series(False, index=avail.index)
+    changed = features.offensive_coordinator_changes(season)
+    if not changed:
+        return pd.Series(False, index=avail.index)
+    is_qb = avail["position"] == "QB"
+    flagged = avail["team"].map(changed).fillna(False)
+    return (is_qb & flagged).astype(bool)
+
+
 def roster_construction_mult(avail: pd.DataFrame, roster_players: pd.DataFrame | None,
                              league: LeagueSettings | None = None) -> pd.DataFrame:
     """Per-candidate multipliers driven by who's already on your roster: bye-week
@@ -1009,4 +1057,8 @@ def explain(row: pd.Series) -> str:
     im = row.get("injury_mult")
     if im is not None and np.isfinite(im) and im < 0.97:
         bits.append(f"thin, injury-prone depth at {row.get('position', '')} ({im:.2f}x)")
+    if row.get("oc_changed"):
+        bits.append("new offensive coordinator this year -- historically ~28% bigger "
+                    "year-over-year efficiency swings, could break either way, treat "
+                    "his trailing numbers with extra caution")
     return "; ".join(bits)

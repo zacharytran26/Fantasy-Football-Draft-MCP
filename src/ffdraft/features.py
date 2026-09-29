@@ -4,6 +4,8 @@ don't break when a website changes its HTML.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -484,9 +486,12 @@ def head_coach_changes(season: int) -> dict[str, bool]:
     year's tendencies actively misleading rather than just noisy.
 
     Only flags head coach turnover -- offensive coordinator changes matter at
-    least as much for offensive scheme, but there's no clean public structured
-    dataset for OC hires/fires the way there is for head coaches, so this only
-    ever *underestimates* true coaching-driven volatility, never overstates it.
+    least as much for offensive scheme, and adp.hc_change_qb_efficiency_volatility
+    found this specifically doesn't predict QB efficiency volatility the way a
+    real OC change does (most HC hires leave the play-caller untouched). See
+    offensive_coordinator_changes for the OC-specific version, sourced from a
+    static compiled dataset since there's no live structured feed for OC hires
+    the way there is for head coaches.
 
     A team with no known prior-season coach (first year in the data, or a
     relocated/renamed franchise) reads as no change -- there's nothing to compare
@@ -496,6 +501,47 @@ def head_coach_changes(season: int) -> dict[str, bool]:
     current = head_coaches(season)
     return {team: (prior.get(team) is not None and coach != prior.get(team))
            for team, coach in current.items()}
+
+
+_OC_CHANGE_HISTORY_PATH = Path(__file__).resolve().parent.parent.parent / "docs" / "oc_change_history.csv"
+
+
+def offensive_coordinator_changes(season: int) -> dict[str, bool]:
+    """Which teams enter `season` with a different offensive coordinator (real
+    play-caller change, not just head-coach turnover) than the year before.
+
+    Deliberate exception to this module's own rule, stated in its docstring:
+    everything else here is computed from raw plays/box scores precisely so it
+    can't go stale or need re-scraping. This can't be -- there is no structured,
+    dynamically-fetchable feed for OC hires/fires the way nflverse's schedule
+    feed carries head coaches (see head_coach_changes). docs/oc_change_history.csv
+    is a static, versioned, manually-compiled artifact instead: 2021-2025 sourced
+    from each team's own Wikipedia season article (compiled and cross-checked
+    team by team), 2026 sourced from 4for4's published coaching-changes hub
+    (its real underlying JSON API, not a scraped/summarized page). Silently
+    returns {} for any season not in that file, and needs a manual refresh every
+    offseason -- there's no way around that without a real structured public
+    dataset this module could poll the way it polls nflverse.
+
+    adp.oc_change_qb_efficiency_volatility backtests this against real QB
+    efficiency and finds a genuine effect -- unlike head_coach_changes, which
+    comes back null for QB efficiency specifically. See that function's
+    docstring for the numbers, and the important caveat that the effect is real
+    but *undirected* (a new OC can raise or lower a QB's efficiency), so it
+    doesn't license a specific score adjustment on its own.
+
+    Also flags whoever holds the OC *title* changing, not necessarily whether
+    play-calling itself changed hands (an internal promotion can move the title
+    without moving the play-caller) -- see model.attach_oc_change_flag's
+    docstring for a real 2026 example this surfaced.
+    """
+    if not _OC_CHANGE_HISTORY_PATH.exists():
+        return {}
+    df = pd.read_csv(_OC_CHANGE_HISTORY_PATH)
+    df = df[df["season"] == season]
+    if df.empty:
+        return {}
+    return dict(zip(df["team"], df["oc_changed"] == "yes"))
 
 
 def vacated_role_events(weekly: pd.DataFrame, byes: dict[int, dict[str, int]],

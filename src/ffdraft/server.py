@@ -1089,6 +1089,183 @@ def hc_change_shrinkage_backtest(seasons: str = "2021,2022,2023,2024,2025",
 
 
 @mcp.tool()
+def hc_change_qb_efficiency_backtest(seasons: str = "2021,2022,2023,2024,2025",
+                                     min_dropbacks: int = 150) -> str:
+    """Backtest: does a head-coach change predict a bigger year-over-year shift in
+    a QB's passing efficiency (EPA/dropback) than coaching continuity -- the same
+    question hc_change_backtest answers for WR/TE target_share, motivated by
+    Caleb Williams' EPA jump when Ben Johnson arrived as Chicago's head coach and
+    Jared Goff's EPA drop when Johnson left Detroit as offensive coordinator.
+
+    IMPORTANT limitation: the Goff/Detroit case itself can't appear in this
+    backtest's cohort. Johnson left as *offensive coordinator*; Dan Campbell
+    stayed head coach. head_coach_changes only sees head-coach turnover, so this
+    tests a related but distinct question -- does HC turnover generally, most of
+    which leaves the play-caller untouched, still predict more QB volatility?
+
+    A 2021-2025 run (114 same-team QB-seasons clearing 150 dropbacks both years,
+    23 with a head-coach change) found no: mean role_shift was about the same
+    either way (0.112 EPA/dropback with a change vs. 0.105 with continuity,
+    +0.0071), and the 95% CI straddles zero (-0.0287 to +0.0605) -- unlike
+    hc_change_backtest's clean positive for WR/TE. Most plausible reading: most
+    head-coach hires don't change the play-caller, so lumping every HC change
+    together dilutes whatever real effect exists (visible in single cases like
+    Williams/Johnson) into noise at the aggregate level.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    hist = adp_mod.hc_change_qb_efficiency_volatility(yrs, min_dropbacks=min_dropbacks)
+    if hist.empty:
+        return json.dumps({"error": "no QB coaching-change backtest data available for those seasons"})
+    summary = adp_mod.hc_change_qb_efficiency_volatility_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.hc_change_qb_efficiency_volatility_summary,
+                              ["difference_in_means"])
+    return json.dumps({
+        "summary": summary,
+        "confidence_intervals": ci,
+        "interpretation": (
+            "difference_in_means = mean role_shift (HC changed) - mean role_shift "
+            "(HC same), in EPA/dropback; near zero or negative means head-coach "
+            "turnover alone doesn't reliably predict bigger QB efficiency swings "
+            "-- see the docstring's limitation about offensive-coordinator-only "
+            "changes like Ben Johnson's Detroit departure, which this cohort "
+            "can't see; confidence_intervals are 95% block-bootstrap intervals "
+            "over seasons"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
+def hc_change_qb_efficiency_shrinkage_backtest(seasons: str = "2021,2022,2023,2024,2025",
+                                               min_dropbacks: int = 150) -> str:
+    """Does shrinking a QB's trailing EPA/dropback toward the position baseline
+    predict his real efficiency better than trusting his own history fully --
+    and if so, is that benefit actually bigger for a head-coach-change cohort
+    than for a coaching-continuity cohort? Only the second question would
+    validate a coaching-specific discount; QB efficiency is famously volatile
+    for everyone year to year, so shrinkage helping *some* cohort was always
+    likely regardless of coaching.
+
+    A 2021-2025 run found real error reduction in *both* groups: best shrinkage
+    (0.7) cut the head-coach-change cohort's error 24% (0.1117 -> 0.0850); best
+    shrinkage (0.4) cut the continuity cohort's error 13% (0.1047 -> 0.0912).
+    The gap between those improvements -- the only number that would actually
+    validate a coaching-specific correction -- is +0.0133, but its 95% CI
+    straddles zero (-0.0073 to +0.0381). Shrinkage is a good idea for any QB's
+    trailing efficiency reading; this backtest can't show it's especially good
+    for coaching-change QBs specifically. Left as a documented negative finding.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    hist = adp_mod.hc_change_qb_efficiency_shrinkage_backtest(yrs, min_dropbacks=min_dropbacks)
+    if hist.empty:
+        return json.dumps({"error": "no QB shrinkage backtest data available for those seasons"})
+    summary = adp_mod.hc_change_qb_efficiency_shrinkage_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.hc_change_qb_efficiency_shrinkage_summary,
+                              ["improvement_is_coaching_specific"])
+    return json.dumps({
+        "summary": summary,
+        "confidence_intervals": ci,
+        "interpretation": (
+            "improvement_vs_no_shrinkage_hc_changed/hc_same: error reduction "
+            "from the best shrinkage level, per cohort; "
+            "improvement_is_coaching_specific: the gap between those two -- "
+            "near zero or negative means shrinkage helps any QB about equally, "
+            "coaching change or not; confidence_intervals are 95% "
+            "block-bootstrap intervals over seasons"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
+def oc_change_qb_efficiency_backtest(seasons: str = "2021,2022,2023,2024,2025",
+                                     min_dropbacks: int = 150) -> str:
+    """The real-play-caller version of hc_change_qb_efficiency_backtest, now that
+    features.offensive_coordinator_changes exists (a static dataset compiled from
+    each team's Wikipedia season page for 2021-2025, and from 4for4's real
+    coaching-changes hub for 2026 -- see that function's docstring). Does a
+    team's actual offensive coordinator changing predict a bigger year-over-year
+    shift in its QB's EPA/dropback than continuity, when "coaching change" means
+    the real play-caller rather than head-coach turnover in general?
+
+    A 2021-2025 run (110 same-team QB-seasons clearing 150 dropbacks both years,
+    53 with a real OC change) found yes, where the head-coach-only version found
+    nothing: mean role_shift 0.1206 EPA/dropback with an OC change vs. 0.0942
+    with continuity (+0.0263, ~28% bigger), 95% CI entirely positive (+0.0013 to
+    +0.0497). This confirms the head-coach version's null result was a
+    data-availability artifact, not evidence the underlying Williams/Goff-style
+    effect isn't real.
+
+    IMPORTANT: role_shift is unsigned -- this validates that a new play-caller
+    makes a QB's efficiency less *predictable*, not which direction it moves.
+    See oc_change_qb_efficiency_shrinkage_backtest before treating this as
+    license for a specific score adjustment.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    hist = adp_mod.oc_change_qb_efficiency_volatility(yrs, min_dropbacks=min_dropbacks)
+    if hist.empty:
+        return json.dumps({"error": "no OC-change backtest data available for those seasons -- "
+                                    "check docs/oc_change_history.csv covers them"})
+    summary = adp_mod.oc_change_qb_efficiency_volatility_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.oc_change_qb_efficiency_volatility_summary,
+                              ["difference_in_means"])
+    return json.dumps({
+        "summary": summary,
+        "confidence_intervals": ci,
+        "interpretation": (
+            "difference_in_means = mean role_shift (OC changed) - mean role_shift "
+            "(OC same), in EPA/dropback; positive and clear of zero means real "
+            "play-caller turnover predicts more QB efficiency volatility than "
+            "continuity; confidence_intervals are 95% block-bootstrap intervals "
+            "over seasons"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
+def oc_change_qb_efficiency_shrinkage_backtest(seasons: str = "2021,2022,2023,2024,2025",
+                                               min_dropbacks: int = 150) -> str:
+    """Now that oc_change_qb_efficiency_backtest has validated real OC turnover
+    predicts more QB efficiency volatility, does shrinking a QB's trailing
+    EPA/dropback toward the position baseline actually predict his real
+    efficiency better for the OC-change cohort *specifically*, more than it
+    helps a coaching-continuity cohort -- the only version of this test that
+    would license an actual score correction?
+
+    A 2021-2025 run found no: best shrinkage (0.7) cut the OC-change cohort's
+    error 11% (0.1206 -> 0.1068); best shrinkage (0.4) cut the continuity
+    cohort's error 18% (0.0942 -> 0.0777) -- shrinkage helped the *continuity*
+    cohort more. The gap (-0.0028) has a 95% CI of -0.0137 to +0.0124 --
+    indistinguishable from zero. Expected consequence of role_shift being
+    unsigned: a new play-caller can push a QB's efficiency up (Williams) or
+    down (Goff), so pulling every OC-change QB's number toward the average
+    helps some and hurts others in a way that washes out on net. The
+    volatility finding stands -- a new-OC QB's trailing efficiency really is
+    less trustworthy -- but there's no validated directional correction from
+    this test alone, which is why the live model only surfaces this as an
+    informational flag (see explain()'s oc_change note) rather than adjusting
+    draft_score.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    hist = adp_mod.oc_change_qb_efficiency_shrinkage_backtest(yrs, min_dropbacks=min_dropbacks)
+    if hist.empty:
+        return json.dumps({"error": "no OC-change shrinkage backtest data available for those seasons"})
+    summary = adp_mod.oc_change_qb_efficiency_shrinkage_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.oc_change_qb_efficiency_shrinkage_summary,
+                              ["improvement_is_coaching_specific"])
+    return json.dumps({
+        "summary": summary,
+        "confidence_intervals": ci,
+        "interpretation": (
+            "improvement_vs_no_shrinkage_oc_changed/oc_same: error reduction "
+            "from the best shrinkage level, per cohort; "
+            "improvement_is_coaching_specific: the gap between those two -- "
+            "near zero or negative means shrinkage helps any QB about equally, "
+            "real OC change or not, despite the volatility itself being real; "
+            "confidence_intervals are 95% block-bootstrap intervals over seasons"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
 def draft_backtest(league_id: str, season: int, top_n: int = 3) -> str:
     """Replay a real past ESPN draft: the algorithm's pick, the true hindsight-best
     pick, and what you actually took, round by round.

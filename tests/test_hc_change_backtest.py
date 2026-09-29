@@ -11,6 +11,13 @@ def _weekly_row(season, team, name, week, target_share, position="WR"):
            "target_share": target_share, "season_type": "REG"}
 
 
+def _qb_row(season, team, name, week, attempts, sacks_suffered, passing_epa):
+    return {"season": season, "recent_team": team, "position": "QB",
+           "player_id": name, "player_display_name": name, "week": week,
+           "attempts": attempts, "sacks_suffered": sacks_suffered,
+           "passing_epa": passing_epa, "season_type": "REG"}
+
+
 class TestHCChangeRoleVolatility:
     def test_hc_change_team_shows_a_bigger_role_shift(self, monkeypatch):
         # NE has a coaching change entering 2025; MIA has continuity. Each has one
@@ -130,3 +137,173 @@ class TestHCChangeShrinkageBacktest:
 
     def test_empty_history_returns_empty_summary(self):
         assert adp.hc_change_shrinkage_summary(pd.DataFrame()) == {"n_players": 0}
+
+
+class TestHCChangeQBEfficiencyVolatility:
+    def test_hc_change_qb_shows_a_bigger_efficiency_shift(self, monkeypatch):
+        # NE has a coaching change entering 2025; MIA has continuity. Each QB's
+        # EPA/dropback moves a lot on the changed team, a little on the stable one.
+        prior_rows, cur_rows = [], []
+        for wk in range(1, 7):
+            prior_rows.append(_qb_row(2024, "NE", "NE_QB", wk, 30, 2, 2.0))
+            cur_rows.append(_qb_row(2025, "NE", "NE_QB", wk, 30, 2, 14.0))
+            prior_rows.append(_qb_row(2024, "MIA", "MIA_QB", wk, 30, 2, 2.0))
+            cur_rows.append(_qb_row(2025, "MIA", "MIA_QB", wk, 30, 2, 2.5))
+
+        def fake_weekly_stats(seasons):
+            return pd.DataFrame(prior_rows if seasons == [2024] else cur_rows)
+
+        monkeypatch.setattr(sources, "weekly_stats", fake_weekly_stats)
+        monkeypatch.setattr(features, "head_coach_changes",
+                           lambda season: {"NE": True, "MIA": False})
+
+        hist = adp.hc_change_qb_efficiency_volatility([2025], min_dropbacks=100)
+        assert not hist.empty
+        assert set(hist["team"]) == {"NE", "MIA"}
+
+        ne_row = hist[hist["team"] == "NE"].iloc[0]
+        mia_row = hist[hist["team"] == "MIA"].iloc[0]
+        assert bool(ne_row["hc_changed"])
+        assert not bool(mia_row["hc_changed"])
+        assert ne_row["role_shift"] > mia_row["role_shift"]
+
+        summary = adp.hc_change_qb_efficiency_volatility_summary(hist)
+        assert summary["n_hc_changed"] == 1
+        assert summary["n_hc_same"] == 1
+        assert summary["difference_in_means"] > 0
+
+    def test_low_dropback_qb_is_excluded(self, monkeypatch):
+        rows = [_qb_row(2024, "NE", "Backup", 1, 10, 1, 1.0)]
+        cur_rows = [_qb_row(2025, "NE", "Backup", 1, 10, 1, 1.0)]
+
+        def fake_weekly_stats(seasons):
+            return pd.DataFrame(rows if seasons == [2024] else cur_rows)
+
+        monkeypatch.setattr(sources, "weekly_stats", fake_weekly_stats)
+        monkeypatch.setattr(features, "head_coach_changes", lambda season: {"NE": True})
+
+        hist = adp.hc_change_qb_efficiency_volatility([2025], min_dropbacks=100)
+        assert hist.empty
+
+    def test_no_head_coach_data_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(features, "head_coach_changes", lambda season: {})
+        hist = adp.hc_change_qb_efficiency_volatility([2099])
+        assert hist.empty
+
+    def test_empty_history_returns_empty_summary(self):
+        assert adp.hc_change_qb_efficiency_volatility_summary(pd.DataFrame()) == {"n_players": 0}
+
+
+class TestHCChangeQBEfficiencyShrinkageBacktest:
+    def test_both_cohorts_are_kept_and_scored_separately(self, monkeypatch):
+        prior_rows, cur_rows = [], []
+        # Coaching-change QB: high prior efficiency, reverts hard toward baseline.
+        for wk in range(1, 7):
+            prior_rows.append(_qb_row(2024, "NE", "ChangedQB", wk, 30, 2, 6.0))
+            cur_rows.append(_qb_row(2025, "NE", "ChangedQB", wk, 30, 2, 0.0))
+        # Continuity QB, included to shape the position baseline and give a
+        # non-empty "hc_same" cohort.
+        for wk in range(1, 7):
+            prior_rows.append(_qb_row(2024, "MIA", "StableQB", wk, 30, 2, 0.0))
+            cur_rows.append(_qb_row(2025, "MIA", "StableQB", wk, 30, 2, 0.0))
+
+        def fake_weekly_stats(seasons):
+            return pd.DataFrame(prior_rows if seasons == [2024] else cur_rows)
+
+        monkeypatch.setattr(sources, "weekly_stats", fake_weekly_stats)
+        monkeypatch.setattr(features, "head_coach_changes",
+                           lambda season: {"NE": True, "MIA": False})
+
+        hist = adp.hc_change_qb_efficiency_shrinkage_backtest(
+            [2025], min_dropbacks=100, shrinkage_levels=(0.0, 0.5, 1.0))
+        assert len(hist) == 2  # both cohorts kept, unlike hc_change_shrinkage_backtest
+
+        summary = adp.hc_change_qb_efficiency_shrinkage_summary(
+            hist, shrinkage_levels=(0.0, 0.5, 1.0))
+        assert summary["n_hc_changed"] == 1
+        assert summary["n_hc_same"] == 1
+        assert summary["improvement_vs_no_shrinkage_hc_changed"] >= 0
+
+    def test_no_head_coach_data_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(features, "head_coach_changes", lambda season: {})
+        hist = adp.hc_change_qb_efficiency_shrinkage_backtest([2099])
+        assert hist.empty
+
+    def test_empty_history_returns_empty_summary(self):
+        assert adp.hc_change_qb_efficiency_shrinkage_summary(pd.DataFrame()) == {"n_players": 0}
+
+
+class TestOCChangeQBEfficiencyVolatility:
+    def test_oc_change_qb_shows_a_bigger_efficiency_shift(self, monkeypatch):
+        prior_rows, cur_rows = [], []
+        for wk in range(1, 7):
+            prior_rows.append(_qb_row(2024, "NE", "NE_QB", wk, 30, 2, 2.0))
+            cur_rows.append(_qb_row(2025, "NE", "NE_QB", wk, 30, 2, 14.0))
+            prior_rows.append(_qb_row(2024, "MIA", "MIA_QB", wk, 30, 2, 2.0))
+            cur_rows.append(_qb_row(2025, "MIA", "MIA_QB", wk, 30, 2, 2.5))
+
+        def fake_weekly_stats(seasons):
+            return pd.DataFrame(prior_rows if seasons == [2024] else cur_rows)
+
+        monkeypatch.setattr(sources, "weekly_stats", fake_weekly_stats)
+        monkeypatch.setattr(features, "offensive_coordinator_changes",
+                           lambda season: {"NE": True, "MIA": False})
+
+        hist = adp.oc_change_qb_efficiency_volatility([2025], min_dropbacks=100)
+        assert not hist.empty
+        assert set(hist["team"]) == {"NE", "MIA"}
+
+        ne_row = hist[hist["team"] == "NE"].iloc[0]
+        mia_row = hist[hist["team"] == "MIA"].iloc[0]
+        assert bool(ne_row["oc_changed"])
+        assert not bool(mia_row["oc_changed"])
+        assert ne_row["role_shift"] > mia_row["role_shift"]
+
+        summary = adp.oc_change_qb_efficiency_volatility_summary(hist)
+        assert summary["n_oc_changed"] == 1
+        assert summary["n_oc_same"] == 1
+        assert summary["difference_in_means"] > 0
+
+    def test_no_oc_change_data_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(features, "offensive_coordinator_changes", lambda season: {})
+        hist = adp.oc_change_qb_efficiency_volatility([2099])
+        assert hist.empty
+
+    def test_empty_history_returns_empty_summary(self):
+        assert adp.oc_change_qb_efficiency_volatility_summary(pd.DataFrame()) == {"n_players": 0}
+
+
+class TestOCChangeQBEfficiencyShrinkageBacktest:
+    def test_both_cohorts_are_kept_and_scored_separately(self, monkeypatch):
+        prior_rows, cur_rows = [], []
+        for wk in range(1, 7):
+            prior_rows.append(_qb_row(2024, "NE", "ChangedQB", wk, 30, 2, 6.0))
+            cur_rows.append(_qb_row(2025, "NE", "ChangedQB", wk, 30, 2, 0.0))
+        for wk in range(1, 7):
+            prior_rows.append(_qb_row(2024, "MIA", "StableQB", wk, 30, 2, 0.0))
+            cur_rows.append(_qb_row(2025, "MIA", "StableQB", wk, 30, 2, 0.0))
+
+        def fake_weekly_stats(seasons):
+            return pd.DataFrame(prior_rows if seasons == [2024] else cur_rows)
+
+        monkeypatch.setattr(sources, "weekly_stats", fake_weekly_stats)
+        monkeypatch.setattr(features, "offensive_coordinator_changes",
+                           lambda season: {"NE": True, "MIA": False})
+
+        hist = adp.oc_change_qb_efficiency_shrinkage_backtest(
+            [2025], min_dropbacks=100, shrinkage_levels=(0.0, 0.5, 1.0))
+        assert len(hist) == 2
+
+        summary = adp.oc_change_qb_efficiency_shrinkage_summary(
+            hist, shrinkage_levels=(0.0, 0.5, 1.0))
+        assert summary["n_oc_changed"] == 1
+        assert summary["n_oc_same"] == 1
+        assert summary["improvement_vs_no_shrinkage_oc_changed"] >= 0
+
+    def test_no_oc_change_data_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(features, "offensive_coordinator_changes", lambda season: {})
+        hist = adp.oc_change_qb_efficiency_shrinkage_backtest([2099])
+        assert hist.empty
+
+    def test_empty_history_returns_empty_summary(self):
+        assert adp.oc_change_qb_efficiency_shrinkage_summary(pd.DataFrame()) == {"n_players": 0}

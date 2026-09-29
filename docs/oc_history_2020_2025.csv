@@ -1,0 +1,193 @@
+team,season,offensive_coordinator_raw,offensive_coordinator,oc_changed
+ARI,2020,UNKNOWN,,
+ARI,2021,UNKNOWN,,
+ARI,2022,UNKNOWN,,
+ARI,2023,Drew Petzing,Drew Petzing,
+ARI,2024,Drew Petzing,Drew Petzing,no
+ARI,2025,Drew Petzing,Drew Petzing,no
+ATL,2020,Dirk Koetter,Dirk Koetter,
+ATL,2021,Dave Ragone,Dave Ragone,yes
+ATL,2022,Dave Ragone,Dave Ragone,no
+ATL,2023,Dave Ragone,Dave Ragone,no
+ATL,2024,Zac Robinson,Zac Robinson,yes
+ATL,2025,Zac Robinson,Zac Robinson,no
+BAL,2020,Greg Roman,Greg Roman,
+BAL,2021,Greg Roman,Greg Roman,no
+BAL,2022,Greg Roman,Greg Roman,no
+BAL,2023,Todd Monken,Todd Monken,yes
+BAL,2024,Todd Monken,Todd Monken,no
+BAL,2025,Todd Monken,Todd Monken,no
+BUF,2020,Brian Daboll,Brian Daboll,
+BUF,2021,Brian Daboll,Brian Daboll,no
+BUF,2022,Ken Dorsey,Ken Dorsey,yes
+BUF,2023,Ken Dorsey (fired after Week 10) / Joe Brady (interim),Ken Dorsey,no
+BUF,2024,Joe Brady,Joe Brady,yes
+BUF,2025,Joe Brady,Joe Brady,no
+CAR,2020,Joe Brady,Joe Brady,
+CAR,2021,Joe Brady (fired mid-season) / Jeff Nixon (interim),Joe Brady,no
+CAR,2022,Ben McAdoo,Ben McAdoo,yes
+CAR,2023,Thomas Brown,Thomas Brown,yes
+CAR,2024,Brad Idzik,Brad Idzik,yes
+CAR,2025,Brad Idzik,Brad Idzik,no
+CHI,2020,Bill Lazor,Bill Lazor,
+CHI,2021,Bill Lazor,Bill Lazor,no
+CHI,2022,Luke Getsy,Luke Getsy,yes
+CHI,2023,Luke Getsy,Luke Getsy,no
+CHI,2024,Shane Waldron (fired Nov 12) / Thomas Brown (interim) / Chris Beatty (promoted Dec 2),Shane Waldron,yes
+CHI,2025,Declan Doyle,Declan Doyle,yes
+CIN,2020,Brian Callahan,Brian Callahan,
+CIN,2021,Brian Callahan,Brian Callahan,no
+CIN,2022,Brian Callahan,Brian Callahan,no
+CIN,2023,Brian Callahan,Brian Callahan,no
+CIN,2024,Dan Pitcher,Dan Pitcher,yes
+CIN,2025,Dan Pitcher,Dan Pitcher,no
+CLE,2020,Alex Van Pelt,Alex Van Pelt,
+CLE,2021,Alex Van Pelt,Alex Van Pelt,no
+CLE,2022,Alex Van Pelt,Alex Van Pelt,no
+CLE,2023,Alex Van Pelt,Alex Van Pelt,no
+CLE,2024,Ken Dorsey,Ken Dorsey,yes
+CLE,2025,Tommy Rees,Tommy Rees,yes
+DAL,2020,Kellen Moore,Kellen Moore,
+DAL,2021,Kellen Moore,Kellen Moore,no
+DAL,2022,Kellen Moore,Kellen Moore,no
+DAL,2023,Brian Schottenheimer,Brian Schottenheimer,yes
+DAL,2024,Brian Schottenheimer,Brian Schottenheimer,no
+DAL,2025,Klayton Adams,Klayton Adams,yes
+DEN,2020,Pat Shurmur,Pat Shurmur,
+DEN,2021,Pat Shurmur,Pat Shurmur,no
+DEN,2022,Justin Outten,Justin Outten,yes
+DEN,2023,Joe Lombardi,Joe Lombardi,yes
+DEN,2024,Joe Lombardi,Joe Lombardi,no
+DEN,2025,Joe Lombardi,Joe Lombardi,no
+DET,2020,Darrell Bevell,Darrell Bevell,
+DET,2021,Anthony Lynn,Anthony Lynn,yes
+DET,2022,Ben Johnson,Ben Johnson,yes
+DET,2023,Ben Johnson,Ben Johnson,no
+DET,2024,Ben Johnson,Ben Johnson,no
+DET,2025,John Morton,John Morton,yes
+GB,2020,Nathaniel Hackett,Nathaniel Hackett,
+GB,2021,Nathaniel Hackett,Nathaniel Hackett,no
+GB,2022,Adam Stenavich,Adam Stenavich,yes
+GB,2023,Adam Stenavich,Adam Stenavich,no
+GB,2024,Adam Stenavich,Adam Stenavich,no
+GB,2025,Adam Stenavich,Adam Stenavich,no
+HOU,2020,Tim Kelly,Tim Kelly,
+HOU,2021,Tim Kelly,Tim Kelly,no
+HOU,2022,Pep Hamilton,Pep Hamilton,yes
+HOU,2023,Bobby Slowik,Bobby Slowik,yes
+HOU,2024,Bobby Slowik,Bobby Slowik,no
+HOU,2025,Nick Caley,Nick Caley,yes
+IND,2020,Nick Sirianni,Nick Sirianni,
+IND,2021,Marcus Brady,Marcus Brady,yes
+IND,2022,Parks Frazier,Parks Frazier,yes
+IND,2023,Jim Bob Cooter,Jim Bob Cooter,yes
+IND,2024,Jim Bob Cooter,Jim Bob Cooter,no
+IND,2025,Jim Bob Cooter,Jim Bob Cooter,no
+JAX,2020,Jay Gruden,Jay Gruden,
+JAX,2021,Brian Schottenheimer,Brian Schottenheimer,yes
+JAX,2022,Press Taylor,Press Taylor,yes
+JAX,2023,Press Taylor,Press Taylor,no
+JAX,2024,Press Taylor,Press Taylor,no
+JAX,2025,Grant Udinski,Grant Udinski,yes
+KC,2020,Eric Bieniemy,Eric Bieniemy,
+KC,2021,Eric Bieniemy,Eric Bieniemy,no
+KC,2022,Eric Bieniemy,Eric Bieniemy,no
+KC,2023,Matt Nagy,Matt Nagy,yes
+KC,2024,Matt Nagy,Matt Nagy,no
+KC,2025,Matt Nagy,Matt Nagy,no
+LAC,2020,Shane Steichen,Shane Steichen,
+LAC,2021,Joe Lombardi,Joe Lombardi,yes
+LAC,2022,Joe Lombardi,Joe Lombardi,no
+LAC,2023,Kellen Moore,Kellen Moore,yes
+LAC,2024,Greg Roman,Greg Roman,yes
+LAC,2025,Greg Roman,Greg Roman,no
+LAR,2020,Kevin O'Connell,Kevin O'Connell,
+LAR,2021,Kevin O'Connell,Kevin O'Connell,no
+LAR,2022,Liam Coen,Liam Coen,yes
+LAR,2023,Mike LaFleur,Mike LaFleur,yes
+LAR,2024,Mike LaFleur,Mike LaFleur,no
+LAR,2025,Mike LaFleur,Mike LaFleur,no
+LV,2020,Greg Olson,Greg Olson,
+LV,2021,Greg Olson,Greg Olson,no
+LV,2022,Mick Lombardi,Mick Lombardi,yes
+LV,2023,Mick Lombardi (fired Oct 31; interim Bo Hardegree),Mick Lombardi,no
+LV,2024,Luke Getsy (fired Nov 5; interim Scott Turner),Luke Getsy,yes
+LV,2025,Chip Kelly (fired Nov 23; interim Greg Olson),Chip Kelly,yes
+MIA,2020,Chan Gailey,Chan Gailey,
+MIA,2021,Eric Studesville / George Godsey (co-offensive coordinators),Eric Studesville,yes
+MIA,2022,Frank Smith,Frank Smith,yes
+MIA,2023,Frank Smith,Frank Smith,no
+MIA,2024,Frank Smith,Frank Smith,no
+MIA,2025,Frank Smith,Frank Smith,no
+MIN,2020,Gary Kubiak,Gary Kubiak,
+MIN,2021,Klint Kubiak,Klint Kubiak,yes
+MIN,2022,Wes Phillips,Wes Phillips,yes
+MIN,2023,Wes Phillips,Wes Phillips,no
+MIN,2024,Wes Phillips,Wes Phillips,no
+MIN,2025,Wes Phillips,Wes Phillips,no
+NE,2020,Josh McDaniels,Josh McDaniels,
+NE,2021,Josh McDaniels,Josh McDaniels,no
+NE,2022,Matt Patricia (no formal OC title; given offensive playcalling duties),Matt Patricia,yes
+NE,2023,Bill O'Brien,Bill O'Brien,yes
+NE,2024,Alex Van Pelt,Alex Van Pelt,yes
+NE,2025,Josh McDaniels,Josh McDaniels,yes
+NO,2020,Pete Carmichael Jr.,Pete Carmichael Jr.,
+NO,2021,Pete Carmichael Jr.,Pete Carmichael Jr.,no
+NO,2022,Pete Carmichael Jr.,Pete Carmichael Jr.,no
+NO,2023,Pete Carmichael Jr.,Pete Carmichael Jr.,no
+NO,2024,Klint Kubiak,Klint Kubiak,yes
+NO,2025,Doug Nussmeier,Doug Nussmeier,yes
+NYG,2020,Jason Garrett,Jason Garrett,
+NYG,2021,Jason Garrett (fired after Week 11; interim Freddie Kitchens),Jason Garrett,no
+NYG,2022,Mike Kafka,Mike Kafka,yes
+NYG,2023,Mike Kafka,Mike Kafka,no
+NYG,2024,Mike Kafka,Mike Kafka,no
+NYG,2025,Tim Kelly,Tim Kelly,yes
+NYJ,2020,Dowell Loggains,Dowell Loggains,
+NYJ,2021,Mike LaFleur,Mike LaFleur,yes
+NYJ,2022,Mike LaFleur,Mike LaFleur,no
+NYJ,2023,Nathaniel Hackett,Nathaniel Hackett,yes
+NYJ,2024,Nathaniel Hackett,Nathaniel Hackett,no
+NYJ,2025,Tanner Engstrand,Tanner Engstrand,yes
+PHI,2020,UNKNOWN,,
+PHI,2021,Shane Steichen,Shane Steichen,
+PHI,2022,Shane Steichen,Shane Steichen,no
+PHI,2023,Brian Johnson,Brian Johnson,yes
+PHI,2024,Kellen Moore,Kellen Moore,yes
+PHI,2025,Kevin Patullo,Kevin Patullo,yes
+PIT,2020,Randy Fichtner,Randy Fichtner,
+PIT,2021,Matt Canada,Matt Canada,yes
+PIT,2022,Matt Canada,Matt Canada,no
+PIT,2023,Matt Canada,Matt Canada,no
+PIT,2024,Arthur Smith,Arthur Smith,yes
+PIT,2025,Arthur Smith,Arthur Smith,no
+SEA,2020,Brian Schottenheimer,Brian Schottenheimer,
+SEA,2021,Shane Waldron,Shane Waldron,yes
+SEA,2022,Shane Waldron,Shane Waldron,no
+SEA,2023,Shane Waldron,Shane Waldron,no
+SEA,2024,Ryan Grubb,Ryan Grubb,yes
+SEA,2025,Klint Kubiak,Klint Kubiak,yes
+SF,2020,Kyle Shanahan (de facto),Kyle Shanahan,
+SF,2021,Mike McDaniel,Mike McDaniel,yes
+SF,2022,Kyle Shanahan (de facto),Kyle Shanahan,yes
+SF,2023,Kyle Shanahan (de facto),Kyle Shanahan,no
+SF,2024,Kyle Shanahan (de facto),Kyle Shanahan,no
+SF,2025,Klay Kubiak,Klay Kubiak,yes
+TB,2020,Byron Leftwich,Byron Leftwich,
+TB,2021,Byron Leftwich,Byron Leftwich,no
+TB,2022,Byron Leftwich,Byron Leftwich,no
+TB,2023,Dave Canales,Dave Canales,yes
+TB,2024,Liam Coen,Liam Coen,yes
+TB,2025,Josh Grizzard,Josh Grizzard,yes
+TEN,2020,Arthur Smith,Arthur Smith,
+TEN,2021,Todd Downing,Todd Downing,yes
+TEN,2022,Todd Downing,Todd Downing,no
+TEN,2023,Tim Kelly,Tim Kelly,yes
+TEN,2024,Nick Holz,Nick Holz,yes
+TEN,2025,Nick Holz,Nick Holz,no
+WAS,2020,Scott Turner,Scott Turner,
+WAS,2021,Scott Turner,Scott Turner,no
+WAS,2022,Scott Turner,Scott Turner,no
+WAS,2023,Eric Bieniemy,Eric Bieniemy,yes
+WAS,2024,Kliff Kingsbury,Kliff Kingsbury,yes
+WAS,2025,Kliff Kingsbury,Kliff Kingsbury,no

@@ -205,6 +205,30 @@ class TestHeadCoachChanges:
         assert out["BUF"] is False
 
 
+class TestOffensiveCoordinatorChanges:
+    def test_reads_flags_for_a_season_from_the_csv(self, tmp_path, monkeypatch):
+        csv_path = tmp_path / "oc_change_history.csv"
+        csv_path.write_text(
+            "team,season,oc_changed,source\n"
+            "DET,2026,yes,4for4\n"
+            "BAL,2026,no,4for4\n"
+            "DET,2025,no,wikipedia\n"
+        )
+        monkeypatch.setattr(features, "_OC_CHANGE_HISTORY_PATH", csv_path)
+        out = features.offensive_coordinator_changes(2026)
+        assert out == {"DET": True, "BAL": False}
+
+    def test_missing_file_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(features, "_OC_CHANGE_HISTORY_PATH", tmp_path / "nope.csv")
+        assert features.offensive_coordinator_changes(2026) == {}
+
+    def test_season_not_in_file_returns_empty(self, tmp_path, monkeypatch):
+        csv_path = tmp_path / "oc_change_history.csv"
+        csv_path.write_text("team,season,oc_changed,source\nDET,2026,yes,4for4\n")
+        monkeypatch.setattr(features, "_OC_CHANGE_HISTORY_PATH", csv_path)
+        assert features.offensive_coordinator_changes(2099) == {}
+
+
 def pytest_approx(x):
     import pytest
     return pytest.approx(x, abs=0.5)

@@ -1,0 +1,32 @@
+team,name,conf,hc_changed_2026,new_hc_name,hc_prev_role,oc_changed_2026,new_oc_name,oc_prev_role,dc_changed_2026,new_dc_name,dc_prev_role
+ARI,Cardinals,nfc,yes,Mike LaFleur,"OC, New York Jets / Rams Passing Game Coord.",yes,Nathaniel Hackett,"HC, Denver Broncos / OC, New York Jets",no,Nick Rallis,"DC, Arizona Cardinals (retained)"
+ATL,Falcons,nfc,yes,Kevin Stefanski,"HC, Cleveland Browns",yes,Tommy Rees,"OC, Notre Dame / Chicago Bears",no,Jeff Ulbrich,"DC, Atlanta Falcons (retained)"
+BAL,Ravens,afc,yes,Jesse Minter,"DC, Michigan / Los Angeles Chargers",no,Declan Doyle,"OC, Chicago Bears",yes,Anthony Weaver,"DC, Houston Texans"
+BUF,Bills,afc,yes,Joe Brady,"OC, Buffalo Bills / Carolina Panthers",yes,Pete Carmichael Jr.,"OC, New Orleans Saints",yes,Jim Leonhard,"DC, Wisconsin / New York Jets"
+CAR,Panthers,nfc,no,,,yes,Brad Idzik,"Assistant Offensive Coordinator, Carolina Panthers",no,,
+CHI,Bears,nfc,no,,,no,,,no,,
+CIN,Bengals,afc,no,,,no,,,no,,
+CLE,Browns,afc,yes,Todd Monken,"OC, Baltimore Ravens",yes,Travis Switzer,"WR Coach, Baltimore Ravens",yes,Mike Rutenberg,"DB Coach, Atlanta Falcons"
+DAL,Cowboys,nfc,no,,,no,,,yes,Christian Parker,"Passing Game Coordinator, Philadelphia Eagles"
+DEN,Broncos,afc,no,,,yes,Davis Webb,"Passing Game Coordinator, Denver Broncos",no,,
+DET,Lions,nfc,no,,,yes,Drew Petzing,"OC, Cleveland Browns",no,,
+GB,Packers,nfc,no,,,no,,,yes,Jonathan Gannon,"HC, Arizona Cardinals / DC, Philadelphia Eagles"
+HOU,Texans,afc,no,,,no,,,no,,
+IND,Colts,afc,no,,,no,,,no,,
+JAX,Jaguars,afc,no,,,no,,,no,,
+KC,Chiefs,afc,no,,,yes,Eric Bieniemy,"OC, Washington Commanders (returning to KC)",no,,
+LAC,Chargers,afc,no,,,yes,Mike McDaniel,"HC, Miami Dolphins",yes,Chris O'Leary,"DC, Western Michigan"
+LAR,Rams,nfc,no,,,no,,,no,,
+LV,Raiders,afc,yes,Klint Kubiak,"OC, San Francisco 49ers / Minnesota Vikings",yes,Andrew Janocko,"QB Coach, Seattle Seahawks",yes,Rob Leonard,"DL Coach, Las Vegas Raiders"
+MIA,Dolphins,afc,yes,Jeff Hafley,"HC, Boston College / DC, Green Bay Packers",yes,Bobby Slowik,"OC, Houston Texans",yes,Sean Duggan,"LB Coach, Green Bay Packers"
+MIN,Vikings,nfc,no,,,no,,,no,,
+NO,Saints,nfc,no,,,no,,,no,,
+NYG,Giants,nfc,yes,John Harbaugh,"HC, Baltimore Ravens (retired)",yes,Matt Nagy,"HC, Chicago Bears / OC/QB coach, Kansas City Chiefs",yes,Dennard Wilson,"DC, Tennessee Titans"
+NYJ,Jets,afc,no,,,yes,Frank Reich,"HC, Carolina Panthers / OC, Indianapolis Colts",yes,Brian Duker,"DB Coach, Miami Dolphins"
+PHI,Eagles,nfc,no,,,yes,Sean Mannion,"QB Coach, Green Bay Packers",no,,
+PIT,Steelers,afc,yes,Mike McCarthy,"HC, Dallas Cowboys",yes,Brian Angelichio,"Passing Game Coordinator/TE Coach, Minnesota Vikings",yes,Patrick Graham,"DC, Las Vegas Raiders / New York Giants"
+SEA,Seahawks,nfc,no,,,yes,Brian Fleury,"TE Coach/Run Game Coordinator, San Francisco 49ers",no,,
+SF,49ers,nfc,no,,,no,,,yes,Raheem Morris,"HC, Atlanta Falcons / DC, Los Angeles Rams"
+TB,Buccaneers,nfc,no,,,yes,Zac Robinson,"OC, Los Angeles Rams",no,,
+TEN,Titans,afc,yes,Robert Saleh,"HC, New York Jets",yes,Brian Daboll,"HC, New York Giants",yes,Gus Bradley,"DC, Indianapolis Colts"
+WAS,Commanders,nfc,no,,,yes,David Blough,"QB Coach, Washington Commanders",yes,Daronte Jones,"DB Coach, Minnesota Vikings / DC, LSU"

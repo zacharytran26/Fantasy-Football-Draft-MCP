@@ -1205,6 +1205,500 @@ def hc_change_shrinkage_summary(hist: pd.DataFrame,
     }
 
 
+_QB_MIN_DROPBACKS = 150
+
+
+def hc_change_qb_efficiency_volatility(seasons: list[int],
+                                       min_dropbacks: int = _QB_MIN_DROPBACKS) -> pd.DataFrame:
+    """The Caleb Williams / Jared Goff observation, generalized: one row per QB who
+    started for the *same* team in both `season - 1` and `season` -- does his
+    team's head coach changing entering `season` predict a bigger year-over-year
+    shift in passing efficiency (EPA per dropback) than coaching continuity, the
+    same question hc_change_role_volatility asked about WR/TE target_share?
+
+    Restricted the same way: the merge on player_id + recent_team enforces "same
+    team both seasons," isolating a coaching-change effect from a player simply
+    changing teams. `min_dropbacks` (attempts + sacks_suffered), not min_games --
+    a QB's efficiency reading needs real pass-game volume to mean anything, and
+    games played alone doesn't guarantee that (a QB pulled early in a few blowouts
+    could clear a games threshold on very few actual dropbacks).
+
+    role_shift is the absolute year-over-year change in EPA/dropback -- magnitude,
+    not direction, since a coaching change can plausibly help (Ben Johnson arriving
+    in Chicago raised Caleb Williams' efficiency) or hurt (Ben Johnson leaving
+    Detroit lowered Jared Goff's) -- what matters here is how much a coaching
+    change moves the number, either way.
+
+    IMPORTANT limitation, sharper here than anywhere else this session's used
+    features.head_coach_changes: that Detroit/Goff case is itself invisible to
+    this backtest's cohort. Ben Johnson left as *offensive coordinator*; Dan
+    Campbell stayed head coach throughout. head_coach_changes only sees head
+    coach turnover (there's no clean public OC dataset -- see its docstring), so
+    the exact real-world example that motivated this function can never appear
+    in the "hc_changed" group it builds. Every case below is a real head-coach
+    change instead (e.g. the Jets hiring Aaron Glenn for 2025) -- a related but
+    distinct question: does *head-coach* turnover specifically, most of which
+    leaves the offensive coordinator and scheme untouched, still show up as
+    bigger QB volatility?
+
+    A 2021-2025 run (114 same-team QB-seasons clearing 150 dropbacks in both
+    years, 23 with a head-coach change) found no: mean role_shift was actually
+    about the same either way (0.112 EPA/dropback with a coaching change vs.
+    0.105 with continuity, +0.0071), and bootstrap_ci's 95% interval straddles
+    zero (-0.0287 to +0.0605) -- not distinguishable from noise, unlike
+    hc_change_role_volatility's clean positive result for WR/TE target_share.
+    The most plausible reason, given the limitation above: most head-coach
+    hires don't change who calls plays on offense, so lumping every HC change
+    together dilutes whatever real OC-driven effect exists (visible in single
+    cases like Williams/Johnson) into noise at the aggregate level. A cohort of
+    confirmed *playcaller* changes, not just HC changes, is the test this
+    backtest can't run without that missing OC dataset.
+    """
+    from . import features
+
+    rows = []
+    for season in seasons:
+        try:
+            hc_changed = features.head_coach_changes(season)
+            if not hc_changed:
+                print(f"  ! {season}: no head coach data (schedule not published?)")
+                continue
+
+            def qb_efficiency(szn):
+                w = sources.weekly_stats([szn])
+                w = w[(w["season_type"] == "REG") & (w["position"] == "QB")]
+                w = w.assign(dropbacks=w["attempts"].fillna(0) + w["sacks_suffered"].fillna(0))
+                g = (w.groupby(["player_id", "player_display_name", "recent_team"])
+                    .agg(games=("week", "nunique"), dropbacks=("dropbacks", "sum"),
+                         passing_epa=("passing_epa", "sum"))
+                    .reset_index())
+                g["epa_per_db"] = g["passing_epa"] / g["dropbacks"].replace(0, np.nan)
+                return g
+
+            prior = qb_efficiency(season - 1)
+            cur = qb_efficiency(season)
+            prior_q = prior[prior["dropbacks"] >= min_dropbacks].dropna(subset=["epa_per_db"])
+            cur_q = cur[cur["dropbacks"] >= min_dropbacks].dropna(subset=["epa_per_db"])
+            if prior_q.empty:
+                continue
+
+            m = prior_q.merge(cur_q, on=["player_id", "recent_team"], suffixes=("_prior", "_cur"))
+            if m.empty:
+                continue
+            m["role_shift"] = (m["epa_per_db_cur"] - m["epa_per_db_prior"]).abs()
+            m["hc_changed"] = m["recent_team"].map(hc_changed).fillna(False)
+            m["season"] = season
+            rows.append(m.rename(columns={"player_display_name_cur": "name",
+                                          "recent_team": "team"})
+                       [["season", "player_id", "name", "team", "epa_per_db_prior",
+                        "epa_per_db_cur", "role_shift", "hc_changed"]])
+        except Exception as exc:
+            print(f"  ! {season}: {type(exc).__name__}: {exc}")
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def hc_change_qb_efficiency_volatility_summary(hist: pd.DataFrame) -> dict:
+    """Score hc_change_qb_efficiency_volatility's output: the same
+    difference-in-means test hc_change_role_volatility_summary runs for WR/TE
+    target_share, applied here to QB EPA/dropback.
+
+    Near zero or negative difference_in_means -- what the 2021-2025 real run
+    found -- means head-coach turnover doesn't reliably predict bigger QB
+    efficiency swings than continuity, and per this session's standing rule,
+    this stays a documented (negative) finding rather than a live discount.
+    See hc_change_qb_efficiency_volatility's docstring for why: this cohort is
+    built from head-coach changes, most of which don't touch the play-caller,
+    so it can't see the specific offensive-coordinator effect the Williams/Goff
+    cases actually demonstrate.
+    """
+    if hist.empty:
+        return {"n_players": 0}
+    changed = hist[hist["hc_changed"]]
+    same = hist[~hist["hc_changed"]]
+    return {
+        "n_players": int(len(hist)),
+        "n_hc_changed": int(len(changed)),
+        "n_hc_same": int(len(same)),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "mean_role_shift_hc_changed": float(changed["role_shift"].mean()) if not changed.empty else float("nan"),
+        "mean_role_shift_hc_same": float(same["role_shift"].mean()) if not same.empty else float("nan"),
+        "median_role_shift_hc_changed": float(changed["role_shift"].median()) if not changed.empty else float("nan"),
+        "median_role_shift_hc_same": float(same["role_shift"].median()) if not same.empty else float("nan"),
+        "difference_in_means": (float(changed["role_shift"].mean() - same["role_shift"].mean())
+                                if not changed.empty and not same.empty else float("nan")),
+    }
+
+
+def hc_change_qb_efficiency_shrinkage_backtest(seasons: list[int],
+                                               min_dropbacks: int = _QB_MIN_DROPBACKS,
+                                               shrinkage_levels: tuple[float, ...] = _HC_SHRINKAGE_LEVELS
+                                               ) -> pd.DataFrame:
+    """Unlike hc_change_shrinkage_backtest, this keeps BOTH cohorts -- head-coach
+    changed and continuity -- in the same table, not just the changed one. The
+    real question worth asking here isn't "does shrinking a QB's EPA/dropback
+    toward the position baseline predict his real efficiency better than trusting
+    his own history" (year-to-year QB efficiency is famously volatile for
+    everyone, coaching change or not, so shrinkage was always likely to help some
+    cohort); it's "does it help the head-coach-change cohort by *more* than it
+    helps a coaching-continuity cohort" -- the only version of this test that
+    would actually validate a coaching-specific discount rather than rediscovering
+    generic QB mean-reversion. `pos_baseline` (the shrink target) is the *prior*
+    season's average EPA/dropback among all qualifying starters, leak-free --
+    computed once per season from every starter, not separately for each cohort,
+    so both groups are being pulled toward the same target.
+
+    A 2021-2025 run found real error reduction from shrinkage in *both* cohorts:
+    best level 0.7 for the head-coach-change group cut mean absolute error from
+    0.1117 (no shrinkage) to 0.0850 (-24%), and best level 0.4 for the continuity
+    group cut it from 0.1047 to 0.0912 (-13%). The gap between those two
+    improvements (+0.0133, coaching-change benefiting more) is exactly the
+    "coaching-specific" effect hc_change_shrinkage_backtest validated for WR/TE
+    role -- but here bootstrap_ci's 95% interval on that gap straddles zero
+    (-0.0073 to +0.0381). Shrinkage is a good idea for any QB's trailing
+    efficiency reading, coaching change or not; this backtest can't show it's
+    *especially* good for the coaching-change cohort specifically. Left as a
+    documented negative finding, same as hc_change_qb_efficiency_volatility.
+    """
+    from . import features
+
+    rows = []
+    for season in seasons:
+        try:
+            hc_changed = features.head_coach_changes(season)
+            if not hc_changed:
+                print(f"  ! {season}: no head coach data (schedule not published?)")
+                continue
+
+            w_prior = sources.weekly_stats([season - 1])
+            w_prior = w_prior[(w_prior["season_type"] == "REG") & (w_prior["position"] == "QB")]
+            w_prior = w_prior.assign(
+                dropbacks=w_prior["attempts"].fillna(0) + w_prior["sacks_suffered"].fillna(0))
+            w_cur = sources.weekly_stats([season])
+            w_cur = w_cur[(w_cur["season_type"] == "REG") & (w_cur["position"] == "QB")]
+            w_cur = w_cur.assign(
+                dropbacks=w_cur["attempts"].fillna(0) + w_cur["sacks_suffered"].fillna(0))
+
+            prior_agg = (w_prior.groupby(["player_id", "recent_team"])
+                        .agg(dropbacks=("dropbacks", "sum"), passing_epa=("passing_epa", "sum"))
+                        .reset_index())
+            prior_agg["epa_per_db"] = prior_agg["passing_epa"] / prior_agg["dropbacks"].replace(0, np.nan)
+            cur_agg = (w_cur.groupby(["player_id", "recent_team"])
+                      .agg(dropbacks=("dropbacks", "sum"), passing_epa=("passing_epa", "sum"))
+                      .reset_index())
+            cur_agg["epa_per_db"] = cur_agg["passing_epa"] / cur_agg["dropbacks"].replace(0, np.nan)
+
+            prior_q = prior_agg[prior_agg["dropbacks"] >= min_dropbacks].dropna(subset=["epa_per_db"])
+            cur_q = cur_agg[cur_agg["dropbacks"] >= min_dropbacks].dropna(subset=["epa_per_db"])
+            if prior_q.empty:
+                continue
+            # Leak-free position baseline: only the prior season's own cohort,
+            # shared by both the changed and continuity groups below.
+            pos_baseline = float(prior_q["epa_per_db"].mean())
+
+            m = prior_q.merge(cur_q, on=["player_id", "recent_team"], suffixes=("_prior", "_cur"))
+            if m.empty:
+                continue
+            m["hc_changed"] = m["recent_team"].map(hc_changed).fillna(False)
+            m["pos_baseline"] = pos_baseline
+            m["season"] = season
+            rows.append(m[["season", "player_id", "epa_per_db_prior", "epa_per_db_cur",
+                          "pos_baseline", "hc_changed"]])
+        except Exception as exc:
+            print(f"  ! {season}: {type(exc).__name__}: {exc}")
+
+    hist = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    if hist.empty:
+        return hist
+    for lv in shrinkage_levels:
+        pred = (1 - lv) * hist["epa_per_db_prior"] + lv * hist["pos_baseline"]
+        hist[f"abs_err_shrink_{lv}"] = (pred - hist["epa_per_db_cur"]).abs()
+    return hist
+
+
+def hc_change_qb_efficiency_shrinkage_summary(hist: pd.DataFrame,
+                                              shrinkage_levels: tuple[float, ...] = _HC_SHRINKAGE_LEVELS
+                                              ) -> dict:
+    """Score hc_change_qb_efficiency_shrinkage_backtest's output for both cohorts,
+    and report the gap between them -- `improvement_is_coaching_specific` -- which
+    is the number that actually matters. Near zero or negative means shrinkage
+    helps any QB's trailing efficiency reading about equally, coaching change or
+    not, and per this session's rule this stays a documented finding rather than
+    a live discount. See the backtest's docstring for the real 2021-2025 numbers
+    (gap +0.0133, 95% CI -0.0073 to +0.0381 -- not distinguishable from zero).
+    """
+    if hist.empty:
+        return {"n_players": 0}
+
+    def errs_for(g: pd.DataFrame) -> tuple[dict, float | None]:
+        e = {lv: float(g[f"abs_err_shrink_{lv}"].mean())
+            for lv in shrinkage_levels if f"abs_err_shrink_{lv}" in g.columns}
+        best = min(e, key=e.get) if e else None
+        return e, best
+
+    changed = hist[hist["hc_changed"]]
+    same = hist[~hist["hc_changed"]]
+    errs_c, best_c = errs_for(changed) if not changed.empty else ({}, None)
+    errs_s, best_s = errs_for(same) if not same.empty else ({}, None)
+    improve_c = (errs_c.get(0.0) - errs_c[best_c]) if best_c is not None else None
+    improve_s = (errs_s.get(0.0) - errs_s[best_s]) if best_s is not None else None
+
+    return {
+        "n_hc_changed": int(len(changed)),
+        "n_hc_same": int(len(same)),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "mean_abs_error_by_shrinkage_hc_changed": errs_c,
+        "mean_abs_error_by_shrinkage_hc_same": errs_s,
+        "best_shrinkage_hc_changed": best_c,
+        "best_shrinkage_hc_same": best_s,
+        "improvement_vs_no_shrinkage_hc_changed": improve_c,
+        "improvement_vs_no_shrinkage_hc_same": improve_s,
+        "improvement_is_coaching_specific": (improve_c - improve_s)
+                                           if improve_c is not None and improve_s is not None else None,
+    }
+
+
+def oc_change_qb_efficiency_volatility(seasons: list[int],
+                                       min_dropbacks: int = _QB_MIN_DROPBACKS) -> pd.DataFrame:
+    """The real-offensive-coordinator version of hc_change_qb_efficiency_volatility,
+    now that features.offensive_coordinator_changes exists -- does a team's actual
+    play-caller changing entering `season` predict a bigger year-over-year shift in
+    its QB's passing efficiency (EPA/dropback) than continuity, when "coaching
+    change" means the play-caller specifically rather than head-coach turnover in
+    general?
+
+    Same structure as hc_change_qb_efficiency_volatility (same-team merge on
+    player_id + recent_team, min_dropbacks over games as the qualifying bar,
+    role_shift as the unsigned year-over-year change), swapping in
+    features.offensive_coordinator_changes for features.head_coach_changes.
+
+    A 2021-2025 run (110 same-team QB-seasons clearing 150 dropbacks both years,
+    53 with a real OC change) found what hc_change_qb_efficiency_volatility
+    couldn't: mean role_shift was 0.1206 EPA/dropback with an OC change vs. 0.0942
+    with continuity (+0.0263, ~28% bigger), and bootstrap_ci's 95% interval is
+    entirely positive (+0.0013 to +0.0497) -- not noise, and a real validation of
+    the pattern the Williams/Goff case studies suggested. Confirms the diagnosis
+    in hc_change_qb_efficiency_volatility's docstring: the null result there was
+    a data-availability artifact (most head-coach hires don't touch the
+    play-caller), not evidence the underlying effect isn't real.
+
+    IMPORTANT caveat this doesn't resolve: role_shift is unsigned. This says a new
+    play-caller reliably makes a QB's efficiency *less predictable*, not which way
+    it moves -- Ben Johnson arriving in Chicago raised Caleb Williams' efficiency;
+    Ben Johnson leaving Detroit lowered Jared Goff's. See
+    oc_change_qb_efficiency_shrinkage_backtest for why that distinction matters:
+    an undirected volatility finding doesn't automatically license a specific
+    score correction.
+    """
+    from . import features
+
+    rows = []
+    for season in seasons:
+        try:
+            oc_changed = features.offensive_coordinator_changes(season)
+            if not oc_changed:
+                print(f"  ! {season}: no OC-change data available")
+                continue
+
+            def qb_efficiency(szn):
+                w = sources.weekly_stats([szn])
+                w = w[(w["season_type"] == "REG") & (w["position"] == "QB")]
+                w = w.assign(dropbacks=w["attempts"].fillna(0) + w["sacks_suffered"].fillna(0))
+                g = (w.groupby(["player_id", "player_display_name", "recent_team"])
+                    .agg(games=("week", "nunique"), dropbacks=("dropbacks", "sum"),
+                         passing_epa=("passing_epa", "sum"))
+                    .reset_index())
+                g["epa_per_db"] = g["passing_epa"] / g["dropbacks"].replace(0, np.nan)
+                return g
+
+            prior = qb_efficiency(season - 1)
+            cur = qb_efficiency(season)
+            prior_q = prior[prior["dropbacks"] >= min_dropbacks].dropna(subset=["epa_per_db"])
+            cur_q = cur[cur["dropbacks"] >= min_dropbacks].dropna(subset=["epa_per_db"])
+            if prior_q.empty:
+                continue
+
+            m = prior_q.merge(cur_q, on=["player_id", "recent_team"], suffixes=("_prior", "_cur"))
+            if m.empty:
+                continue
+            m["role_shift"] = (m["epa_per_db_cur"] - m["epa_per_db_prior"]).abs()
+            m["oc_changed"] = m["recent_team"].map(oc_changed)
+            m = m.dropna(subset=["oc_changed"])
+            if m.empty:
+                continue
+            m["oc_changed"] = m["oc_changed"].astype(bool)
+            m["season"] = season
+            rows.append(m.rename(columns={"player_display_name_cur": "name",
+                                          "recent_team": "team"})
+                       [["season", "player_id", "name", "team", "epa_per_db_prior",
+                        "epa_per_db_cur", "role_shift", "oc_changed"]])
+        except Exception as exc:
+            print(f"  ! {season}: {type(exc).__name__}: {exc}")
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def oc_change_qb_efficiency_volatility_summary(hist: pd.DataFrame) -> dict:
+    """Score oc_change_qb_efficiency_volatility's output: the same
+    difference-in-means test hc_change_role_volatility_summary runs for WR/TE
+    target_share and hc_change_qb_efficiency_volatility_summary runs (and fails
+    to validate) for head-coach-only QB changes.
+
+    A positive difference_in_means -- what the 2021-2025 real run found
+    (+0.0263, 95% CI +0.0013 to +0.0497, entirely positive) -- means real OC
+    turnover does predict more QB efficiency volatility than continuity. Unlike
+    every prior null result this session found for QB coaching effects, this one
+    clears the bar. See oc_change_qb_efficiency_shrinkage_backtest before
+    treating that as license to adjust a QB's projected score, though --
+    role_shift being unsigned means this validates "less predictable," not
+    "predictably worse" or "predictably better."
+    """
+    if hist.empty:
+        return {"n_players": 0}
+    changed = hist[hist["oc_changed"]]
+    same = hist[~hist["oc_changed"]]
+    return {
+        "n_players": int(len(hist)),
+        "n_oc_changed": int(len(changed)),
+        "n_oc_same": int(len(same)),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "mean_role_shift_oc_changed": float(changed["role_shift"].mean()) if not changed.empty else float("nan"),
+        "mean_role_shift_oc_same": float(same["role_shift"].mean()) if not same.empty else float("nan"),
+        "median_role_shift_oc_changed": float(changed["role_shift"].median()) if not changed.empty else float("nan"),
+        "median_role_shift_oc_same": float(same["role_shift"].median()) if not same.empty else float("nan"),
+        "difference_in_means": (float(changed["role_shift"].mean() - same["role_shift"].mean())
+                                if not changed.empty and not same.empty else float("nan")),
+    }
+
+
+def oc_change_qb_efficiency_shrinkage_backtest(seasons: list[int],
+                                               min_dropbacks: int = _QB_MIN_DROPBACKS,
+                                               shrinkage_levels: tuple[float, ...] = _HC_SHRINKAGE_LEVELS
+                                               ) -> pd.DataFrame:
+    """The real-OC version of hc_change_qb_efficiency_shrinkage_backtest -- now
+    that oc_change_qb_efficiency_volatility has validated the underlying effect,
+    does shrinking a QB's trailing EPA/dropback toward the position baseline
+    actually predict his real efficiency better for the OC-changed cohort
+    *specifically*, more than it helps a coaching-continuity cohort (the only
+    version of this test that would license an actual score correction, per the
+    same logic hc_change_qb_efficiency_shrinkage_backtest used)?
+
+    Same structure: both cohorts kept in the same table, shared leak-free
+    `pos_baseline` from the prior season's full qualifying cohort.
+
+    A 2021-2025 run found the answer is no, despite the volatility finding being
+    real: best shrinkage (0.7) cut the OC-change cohort's error 11% (0.1206 ->
+    0.1068); best shrinkage (0.4) cut the continuity cohort's error 18% (0.0942
+    -> 0.0777) -- shrinkage helped the *continuity* cohort more, not the
+    OC-change one. The gap (-0.0028, negative) has a 95% CI of -0.0137 to
+    +0.0124 -- indistinguishable from zero either way. This is the expected
+    consequence of role_shift being unsigned: shrinkage only reduces error when
+    the deviation trends back toward the baseline, but a new play-caller can push
+    a QB's efficiency up (Williams) or down (Goff) roughly evenly, so pulling
+    every OC-change QB's number toward the average helps some and hurts others
+    in a way that washes out on net. The volatility finding stands -- a
+    new-OC QB's trailing efficiency really is less trustworthy -- but there's no
+    validated *directional* correction to apply from this test alone.
+    """
+    from . import features
+
+    rows = []
+    for season in seasons:
+        try:
+            oc_changed = features.offensive_coordinator_changes(season)
+            if not oc_changed:
+                print(f"  ! {season}: no OC-change data available")
+                continue
+
+            w_prior = sources.weekly_stats([season - 1])
+            w_prior = w_prior[(w_prior["season_type"] == "REG") & (w_prior["position"] == "QB")]
+            w_prior = w_prior.assign(
+                dropbacks=w_prior["attempts"].fillna(0) + w_prior["sacks_suffered"].fillna(0))
+            w_cur = sources.weekly_stats([season])
+            w_cur = w_cur[(w_cur["season_type"] == "REG") & (w_cur["position"] == "QB")]
+            w_cur = w_cur.assign(
+                dropbacks=w_cur["attempts"].fillna(0) + w_cur["sacks_suffered"].fillna(0))
+
+            prior_agg = (w_prior.groupby(["player_id", "recent_team"])
+                        .agg(dropbacks=("dropbacks", "sum"), passing_epa=("passing_epa", "sum"))
+                        .reset_index())
+            prior_agg["epa_per_db"] = prior_agg["passing_epa"] / prior_agg["dropbacks"].replace(0, np.nan)
+            cur_agg = (w_cur.groupby(["player_id", "recent_team"])
+                      .agg(dropbacks=("dropbacks", "sum"), passing_epa=("passing_epa", "sum"))
+                      .reset_index())
+            cur_agg["epa_per_db"] = cur_agg["passing_epa"] / cur_agg["dropbacks"].replace(0, np.nan)
+
+            prior_q = prior_agg[prior_agg["dropbacks"] >= min_dropbacks].dropna(subset=["epa_per_db"])
+            cur_q = cur_agg[cur_agg["dropbacks"] >= min_dropbacks].dropna(subset=["epa_per_db"])
+            if prior_q.empty:
+                continue
+            pos_baseline = float(prior_q["epa_per_db"].mean())
+
+            m = prior_q.merge(cur_q, on=["player_id", "recent_team"], suffixes=("_prior", "_cur"))
+            if m.empty:
+                continue
+            m["oc_changed"] = m["recent_team"].map(oc_changed)
+            m = m.dropna(subset=["oc_changed"])
+            if m.empty:
+                continue
+            m["oc_changed"] = m["oc_changed"].astype(bool)
+            m["pos_baseline"] = pos_baseline
+            m["season"] = season
+            rows.append(m[["season", "player_id", "epa_per_db_prior", "epa_per_db_cur",
+                          "pos_baseline", "oc_changed"]])
+        except Exception as exc:
+            print(f"  ! {season}: {type(exc).__name__}: {exc}")
+
+    hist = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    if hist.empty:
+        return hist
+    for lv in shrinkage_levels:
+        pred = (1 - lv) * hist["epa_per_db_prior"] + lv * hist["pos_baseline"]
+        hist[f"abs_err_shrink_{lv}"] = (pred - hist["epa_per_db_cur"]).abs()
+    return hist
+
+
+def oc_change_qb_efficiency_shrinkage_summary(hist: pd.DataFrame,
+                                              shrinkage_levels: tuple[float, ...] = _HC_SHRINKAGE_LEVELS
+                                              ) -> dict:
+    """Score oc_change_qb_efficiency_shrinkage_backtest's output for both
+    cohorts, and report the gap -- `improvement_is_coaching_specific` -- which is
+    the number that actually matters, same logic as
+    hc_change_qb_efficiency_shrinkage_summary. Near zero or negative (what the
+    2021-2025 run found: -0.0028, 95% CI -0.0137 to +0.0124) means shrinkage
+    doesn't specifically help the OC-change cohort more than continuity, despite
+    oc_change_qb_efficiency_volatility validating that the underlying volatility
+    is real -- see that backtest's docstring for why (role_shift is unsigned).
+    """
+    if hist.empty:
+        return {"n_players": 0}
+
+    def errs_for(g: pd.DataFrame) -> tuple[dict, float | None]:
+        e = {lv: float(g[f"abs_err_shrink_{lv}"].mean())
+            for lv in shrinkage_levels if f"abs_err_shrink_{lv}" in g.columns}
+        best = min(e, key=e.get) if e else None
+        return e, best
+
+    changed = hist[hist["oc_changed"]]
+    same = hist[~hist["oc_changed"]]
+    errs_c, best_c = errs_for(changed) if not changed.empty else ({}, None)
+    errs_s, best_s = errs_for(same) if not same.empty else ({}, None)
+    improve_c = (errs_c.get(0.0) - errs_c[best_c]) if best_c is not None else None
+    improve_s = (errs_s.get(0.0) - errs_s[best_s]) if best_s is not None else None
+
+    return {
+        "n_oc_changed": int(len(changed)),
+        "n_oc_same": int(len(same)),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "mean_abs_error_by_shrinkage_oc_changed": errs_c,
+        "mean_abs_error_by_shrinkage_oc_same": errs_s,
+        "best_shrinkage_oc_changed": best_c,
+        "best_shrinkage_oc_same": best_s,
+        "improvement_vs_no_shrinkage_oc_changed": improve_c,
+        "improvement_vs_no_shrinkage_oc_same": improve_s,
+        "improvement_is_coaching_specific": (improve_c - improve_s)
+                                           if improve_c is not None and improve_s is not None else None,
+    }
+
+
 def repeat_value_players(hist: pd.DataFrame, min_seasons: int = 2) -> pd.DataFrame:
     """Players who beat their draft slot repeatedly rather than once.
 

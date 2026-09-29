@@ -8,7 +8,9 @@ from ffdraft.model import (
     HANDCUFF_BONUS,
     _positional_need,
     apply_current_team,
+    attach_oc_change_flag,
     expected_best_at_next_pick,
+    explain,
     likely_alternative_by_position,
     roster_construction_mult,
     survival_probability,
@@ -468,6 +470,46 @@ class TestRosterConstructionMult:
         avail = pd.DataFrame([{"position": "WR", "team": "SF", "bye": 9, "draft_score": 20.0}])
         out = roster_construction_mult(avail, None)
         assert (out == 1.0).all().all()
+
+
+class TestOCChangeFlag:
+    def test_flags_only_qb_on_a_changed_team(self, monkeypatch):
+        import ffdraft.model as model_mod
+
+        monkeypatch.setattr(model_mod.features, "offensive_coordinator_changes",
+                           lambda season: {"DET": True, "BAL": False})
+        avail = pd.DataFrame([
+            {"position": "QB", "team": "DET"},
+            {"position": "QB", "team": "BAL"},
+            {"position": "RB", "team": "DET"},
+        ])
+        out = attach_oc_change_flag(avail, season=2026)
+        assert out.tolist() == [True, False, False]
+
+    def test_no_data_flags_nothing(self, monkeypatch):
+        import ffdraft.model as model_mod
+
+        monkeypatch.setattr(model_mod.features, "offensive_coordinator_changes", lambda season: {})
+        avail = pd.DataFrame([{"position": "QB", "team": "DET"}])
+        out = attach_oc_change_flag(avail, season=2026)
+        assert out.tolist() == [False]
+
+    def test_missing_columns_is_a_no_op(self):
+        avail = pd.DataFrame([{"position": "QB"}])
+        out = attach_oc_change_flag(avail, season=2026)
+        assert out.tolist() == [False]
+
+    def test_explain_surfaces_the_flag_without_touching_score(self):
+        row = pd.Series({"position": "QB", "pos_rank": 3, "proj_points": 300.0,
+                         "adj_ppg": 18.0, "oc_changed": True})
+        text = explain(row)
+        assert "offensive coordinator" in text
+
+    def test_explain_says_nothing_when_not_flagged(self):
+        row = pd.Series({"position": "QB", "pos_rank": 3, "proj_points": 300.0,
+                         "adj_ppg": 18.0, "oc_changed": False})
+        text = explain(row)
+        assert "offensive coordinator" not in text
 
 
 class TestLikelyAlternative:
