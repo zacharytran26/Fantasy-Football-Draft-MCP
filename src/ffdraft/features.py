@@ -447,6 +447,57 @@ def bye_weeks(season: int | None = None) -> dict[str, int]:
     return out
 
 
+def head_coaches(season: int | None = None) -> dict[str, str]:
+    """Each team's head coach entering `season`, from the schedule feed's
+    home_coach/away_coach columns (the same feed strength_of_schedule already
+    reads) -- specifically the Week 1 coach, since that's who a drafter actually
+    knows about before the season starts. A team that fires its coach mid-season
+    still reads as having entered the season with the Week 1 hire; that in-season
+    firing is exactly the kind of event a preseason draft decision couldn't have
+    used anyway.
+
+    Empty dict if that season's schedule isn't published yet.
+    """
+    from .config import CURRENT_SEASON
+
+    season = season or CURRENT_SEASON
+    sched = sources.schedules()
+    reg = sched[(sched["season"] == season) & (sched["game_type"] == "REG")]
+    if reg.empty:
+        return {}
+    week1 = reg[reg["week"] == reg["week"].min()]
+    out: dict[str, str] = {}
+    for _, g in week1.iterrows():
+        if pd.notna(g.get("home_coach")):
+            out[g["home_team"]] = g["home_coach"]
+        if pd.notna(g.get("away_coach")):
+            out[g["away_team"]] = g["away_coach"]
+    return out
+
+
+def head_coach_changes(season: int) -> dict[str, bool]:
+    """Which teams enter `season` with a different Week 1 head coach than they had
+    entering `season - 1` -- a real discontinuity that breaks the "recency-weighted
+    blend of past seasons" assumption every other team-level feature in this module
+    relies on (oline_ratings, team_pace_and_split, redzone_identity_shift, schedule
+    difficulty): a new coach can install a different scheme entirely, making last
+    year's tendencies actively misleading rather than just noisy.
+
+    Only flags head coach turnover -- offensive coordinator changes matter at
+    least as much for offensive scheme, but there's no clean public structured
+    dataset for OC hires/fires the way there is for head coaches, so this only
+    ever *underestimates* true coaching-driven volatility, never overstates it.
+
+    A team with no known prior-season coach (first year in the data, or a
+    relocated/renamed franchise) reads as no change -- there's nothing to compare
+    against, so guessing "changed" would be as unfounded as guessing "same."
+    """
+    prior = head_coaches(season - 1)
+    current = head_coaches(season)
+    return {team: (prior.get(team) is not None and coach != prior.get(team))
+           for team, coach in current.items()}
+
+
 def vacated_role_events(weekly: pd.DataFrame, byes: dict[int, dict[str, int]],
                         positions: tuple[str, ...] = ("WR", "TE"),
                         min_games: int = 6) -> pd.DataFrame:

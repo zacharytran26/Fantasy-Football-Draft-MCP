@@ -970,6 +970,125 @@ def vacated_role_backtest(seasons: str = "2021,2022,2023,2024,2025",
 
 
 @mcp.tool()
+def hc_change_backtest(seasons: str = "2021,2022,2023,2024,2025",
+                       positions: str = "WR,TE", min_games: int = 6) -> str:
+    """Backtest: does a head-coach change actually predict a bigger year-over-year
+    shift in a player's role than coaching continuity?
+
+    Every team-level feature this app has (oline_ratings, team_pace_and_split,
+    redzone_identity_shift, schedule difficulty) is a recency-weighted blend of
+    that team's *past* seasons -- an assumption of scheme continuity nothing in
+    this app checks. A new head coach installing a different offense is exactly
+    the kind of discontinuity that could make "blend the last few years" actively
+    misleading rather than just noisy.
+
+    For every player who played real snaps for the *same* team in both
+    `season - 1` and `season` (isolating this from the separate, already-modelled
+    question of what happens when a *player* changes teams), compares the
+    year-over-year change in target_share for players on a team with a new head
+    coach against players on a team with continuity. Only flags head-coach
+    turnover -- there's no clean public dataset for offensive-coordinator hires
+    the way there is for head coaches, so this can only *underestimate* true
+    coaching-driven volatility, never overstate it.
+
+    A positive difference_in_means means coaching change really does predict more
+    role volatility -- worth factoring into how much a team's history should be
+    trusted for players there. Near zero or negative means it isn't, and -- same
+    rule as every other backtest this session -- it stays a documented finding,
+    not a live discount. A 2021-2025 run (715 same-team player-seasons) cleared
+    that bar, the first new signal this session found that actually did:
+    difference_in_means +0.0088 (26% bigger role shift on average), 95% CI
+    entirely positive (+0.0047 to +0.0139) -- not noise, unlike PositionMarkov,
+    position_scarcity_entropy, and vacated-role insurance. Still not wired into
+    a live feature -- that needs a design decision about exactly how much to
+    discount team-history trust, not just confirmation the effect is real.
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    pos = tuple(p.strip().upper() for p in positions.split(",") if p.strip())
+    hist = adp_mod.hc_change_role_volatility(yrs, positions=pos, min_games=min_games)
+    if hist.empty:
+        return json.dumps({"error": "no head-coach-change backtest data available for those "
+                                    "seasons/positions"})
+    summary = adp_mod.hc_change_role_volatility_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.hc_change_role_volatility_summary,
+                              ["difference_in_means"])
+    return json.dumps({
+        "positions": list(pos),
+        "summary": summary,
+        "confidence_intervals": ci,
+        "interpretation": (
+            "difference_in_means = mean role_shift (HC changed) - mean role_shift "
+            "(HC same), in target_share points; positive means coaching turnover "
+            "predicts more role volatility; confidence_intervals are 95% "
+            "block-bootstrap intervals over seasons"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
+def hc_change_shrinkage_backtest(seasons: str = "2021,2022,2023,2024,2025",
+                                 positions: str = "WR,TE", min_games: int = 6) -> str:
+    """hc_change_backtest showed *that* a coaching change makes a player's own
+    recent-season role less trustworthy. This tests the actual fix: does
+    shrinking a coaching-change player's trailing target_share toward the
+    position average -- trusting his own history less, a positional baseline
+    more -- predict his real target_share more accurately than trusting his own
+    history at full weight (shrinkage=0.0, today's implicit behavior, since
+    nothing currently discounts a coaching-change player's role inputs at all)?
+
+    Tries several shrinkage levels (0.0 = fully trust his own history, 1.0 =
+    ignore it and just guess the position average) against the same
+    coaching-change cohort hc_change_backtest validated, scored by mean absolute
+    error against real target_share that season. The position baseline is the
+    *prior* season's average among other qualifying players at that position --
+    leak-free, the same standard every backtest here uses.
+
+    A positive improvement_vs_no_shrinkage at some real shrinkage level means the
+    discount is worth wiring into the live projection for coaching-change
+    players. Near zero or negative means knowing the group is *more volatile*
+    (hc_change_backtest's finding) doesn't automatically mean this particular
+    correction *reduces error* for them -- a real possibility, since more
+    volatility could just as easily mean "harder to predict in either direction"
+    as "predictably reverts toward the mean."
+
+    Caveat on the confidence interval specifically: bootstrap_ci re-picks
+    whichever shrinkage level looks best in each resample rather than testing one
+    level fixed in advance, so it's a "best of several tries" interval -- a
+    known way to look more confident than a single pre-committed comparison
+    would. Treat it as an upper bound on confidence, not the real one.
+
+    A 2021-2025 run (141 coaching-change players) found a real but modest effect,
+    a genuinely weaker verdict than hc_change_backtest's clean positive: light
+    shrinkage (0.2) minimized error (0.0407 vs. no-shrinkage's 0.0428, +0.0021,
+    ~5% relative); aggressive shrinkage (1.0) was worse than no shrinkage at all
+    (0.0606) -- a coaching-change player's own history still carries real signal
+    that full reversion throws away. 95% CI [0.0, +0.0039], lower bound touching
+    zero. Real, but marginal -- a judgment call, not an obvious "wire it in."
+    """
+    yrs = [int(s) for s in seasons.split(",") if s.strip()]
+    pos = tuple(p.strip().upper() for p in positions.split(",") if p.strip())
+    hist = adp_mod.hc_change_shrinkage_backtest(yrs, positions=pos, min_games=min_games)
+    if hist.empty:
+        return json.dumps({"error": "no head-coach shrinkage backtest data available for those "
+                                    "seasons/positions"})
+    summary = adp_mod.hc_change_shrinkage_summary(hist)
+    ci = adp_mod.bootstrap_ci(hist, adp_mod.hc_change_shrinkage_summary,
+                              ["improvement_vs_no_shrinkage"])
+    return json.dumps({
+        "positions": list(pos),
+        "summary": summary,
+        "confidence_intervals": ci,
+        "interpretation": (
+            "mean_abs_error_by_shrinkage: prediction error at each shrinkage level "
+            "tried; best_shrinkage: the level with the lowest error; "
+            "improvement_vs_no_shrinkage: error at shrinkage=0.0 minus the best "
+            "level's error, positive means shrinkage helps; confidence_intervals "
+            "are 95% block-bootstrap intervals over seasons"
+        ),
+    }, indent=2, default=str)
+
+
+@mcp.tool()
 def draft_backtest(league_id: str, season: int, top_n: int = 3) -> str:
     """Replay a real past ESPN draft: the algorithm's pick, the true hindsight-best
     pick, and what you actually took, round by round.

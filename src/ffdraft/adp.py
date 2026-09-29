@@ -979,6 +979,232 @@ def vacated_role_backtest_summary(hist: pd.DataFrame) -> dict:
     }
 
 
+def hc_change_role_volatility(seasons: list[int], positions: tuple[str, ...] = ("WR", "TE"),
+                              min_games: int = 6) -> pd.DataFrame:
+    """One row per player who played real snaps for the *same* team in both
+    `season - 1` and `season`: does his team's head coach changing entering
+    `season` predict a bigger year-over-year shift in his role than a team with
+    coaching continuity?
+
+    Restricted to players who stayed on the same team in both seasons (the merge
+    on `player_id` + `recent_team` enforces this) specifically to isolate the
+    coaching-change question from the separate, already-modelled question of what
+    happens when a *player* changes teams (apply_current_team already re-grades a
+    traded player on his new team's O-line/pace/schedule).
+
+    `role_shift` is the absolute year-over-year change in target_share -- the
+    magnitude, not the direction, since a coaching change could plausibly raise or
+    lower a given player's specific share; what matters for "is last year's
+    history still trustworthy" is how much it moved, either way.
+    """
+    from . import features
+
+    rows = []
+    for season in seasons:
+        try:
+            hc_changed = features.head_coach_changes(season)
+            if not hc_changed:
+                print(f"  ! {season}: no head coach data (schedule not published?)")
+                continue
+
+            def role(szn):
+                w = sources.weekly_stats([szn])
+                w = w[(w["season_type"] == "REG") & (w["position"].isin(positions))]
+                return (w.groupby(["player_id", "player_display_name", "recent_team"])
+                       .agg(games=("week", "nunique"), target_share=("target_share", "mean"))
+                       .reset_index())
+
+            prior = role(season - 1)
+            cur = role(season)
+            prior_q = prior[prior["games"] >= min_games]
+            cur_q = cur[cur["games"] >= min_games]
+
+            m = prior_q.merge(cur_q, on=["player_id", "recent_team"], suffixes=("_prior", "_cur"))
+            if m.empty:
+                continue
+            m["role_shift"] = (m["target_share_cur"] - m["target_share_prior"]).abs()
+            m["hc_changed"] = m["recent_team"].map(hc_changed).fillna(False)
+            m["season"] = season
+            rows.append(m.rename(columns={"player_display_name_cur": "name",
+                                         "recent_team": "team"})
+                       [["season", "player_id", "name", "team", "target_share_prior",
+                        "target_share_cur", "role_shift", "hc_changed"]])
+        except Exception as exc:
+            print(f"  ! {season}: {type(exc).__name__}: {exc}")
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def hc_change_role_volatility_summary(hist: pd.DataFrame) -> dict:
+    """Score hc_change_role_volatility's output: do players on a team with a new
+    head coach actually show a bigger year-over-year role shift than players on a
+    team with coaching continuity?
+
+    `difference_in_means` = mean role_shift (HC changed) - mean role_shift (HC
+    same). Positive means a coaching change really does predict more role
+    volatility -- worth folding into how much a team's O-line/pace/redzone-identity
+    history should be trusted for players there. Near zero or negative means
+    coaching turnover isn't actually more disruptive than normal year-to-year
+    noise, and -- same rule as every other backtest this session -- it stays a
+    documented finding, not a live discount, until it clears that bar.
+
+    A 2021-2025 run (715 same-team player-seasons, 141 with a coaching change)
+    cleared that bar, unlike every new signal tested earlier this session:
+    difference_in_means +0.0088 target_share points (mean role_shift 0.0428 on a
+    changed team vs. 0.0340 with continuity, roughly 26% bigger), and
+    bootstrap_ci's 95% interval is entirely positive (+0.0047 to +0.0139) -- not
+    noise. This is the first sketch this session found that actually validates.
+    Still not wired into any live feature (that would mean deciding exactly how
+    much to discount team-history trust and where -- a design choice, not
+    something this backtest alone settles), but unlike PositionMarkov,
+    position_scarcity_entropy, and vacated-role insurance, this one earned the
+    right to be considered for it.
+    """
+    if hist.empty:
+        return {"n_players": 0}
+    changed = hist[hist["hc_changed"]]
+    same = hist[~hist["hc_changed"]]
+    return {
+        "n_players": int(len(hist)),
+        "n_hc_changed": int(len(changed)),
+        "n_hc_same": int(len(same)),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "mean_role_shift_hc_changed": float(changed["role_shift"].mean()) if not changed.empty else float("nan"),
+        "mean_role_shift_hc_same": float(same["role_shift"].mean()) if not same.empty else float("nan"),
+        "median_role_shift_hc_changed": float(changed["role_shift"].median()) if not changed.empty else float("nan"),
+        "median_role_shift_hc_same": float(same["role_shift"].median()) if not same.empty else float("nan"),
+        "difference_in_means": (float(changed["role_shift"].mean() - same["role_shift"].mean())
+                                if not changed.empty and not same.empty else float("nan")),
+    }
+
+
+_HC_SHRINKAGE_LEVELS = (0.0, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0)
+
+
+def hc_change_shrinkage_backtest(seasons: list[int], positions: tuple[str, ...] = ("WR", "TE"),
+                                 min_games: int = 6,
+                                 shrinkage_levels: tuple[float, ...] = _HC_SHRINKAGE_LEVELS
+                                 ) -> pd.DataFrame:
+    """hc_change_role_volatility_backtest showed *that* a coaching change makes a
+    player's own recent-season role less trustworthy as a predictor. This tests
+    the actual fix: does shrinking his trailing target_share toward the position
+    average -- trusting his own history less, a positional baseline more --
+    predict his *real* target_share that season more accurately than trusting his
+    own history at full weight (shrinkage=0.0, today's implicit behavior, since
+    nothing currently discounts a coaching-change player's role inputs at all)?
+
+    Restricted to the same-team, coaching-change cohort hc_change_role_volatility
+    identified -- shrinkage is a claim about players whose team's continuity broke,
+    not about players generally, so testing it on everyone would dilute the
+    question this is actually asking. `pos_baseline` (the shrink target) is the
+    *prior* season's average target_share among other qualifying players at that
+    position, leak-free -- what a drafter could have known before the season
+    being predicted, the same standard every other backtest here uses. shrinkage=
+    1.0 means ignore the player's own history entirely and just guess the position
+    average; shrinkage=0.0 means trust it completely, ignoring the coaching change.
+    """
+    from . import features
+
+    rows = []
+    for season in seasons:
+        try:
+            hc_changed = features.head_coach_changes(season)
+            if not hc_changed:
+                print(f"  ! {season}: no head coach data (schedule not published?)")
+                continue
+
+            w_prior = sources.weekly_stats([season - 1])
+            w_prior = w_prior[(w_prior["season_type"] == "REG")
+                              & (w_prior["position"].isin(positions))]
+            w_cur = sources.weekly_stats([season])
+            w_cur = w_cur[(w_cur["season_type"] == "REG") & (w_cur["position"].isin(positions))]
+
+            prior_agg = (w_prior.groupby(["player_id", "recent_team", "position"])
+                        .agg(games=("week", "nunique"), target_share=("target_share", "mean"))
+                        .reset_index())
+            cur_agg = (w_cur.groupby(["player_id", "recent_team"])
+                      .agg(games=("week", "nunique"), target_share=("target_share", "mean"))
+                      .reset_index())
+
+            prior_q = prior_agg[prior_agg["games"] >= min_games]
+            cur_q = cur_agg[cur_agg["games"] >= min_games]
+            if prior_q.empty:
+                continue
+            # Leak-free position baseline: only ever the prior season's own
+            # cohort, never anything from the season being predicted.
+            pos_baseline = prior_q.groupby("position")["target_share"].mean().to_dict()
+
+            m = prior_q.merge(cur_q, on=["player_id", "recent_team"], suffixes=("_prior", "_cur"))
+            if m.empty:
+                continue
+            m["hc_changed"] = m["recent_team"].map(hc_changed).fillna(False)
+            m = m[m["hc_changed"]].copy()
+            if m.empty:
+                continue
+            m["pos_baseline"] = m["position"].map(pos_baseline)
+            m["season"] = season
+            rows.append(m[["season", "player_id", "position", "target_share_prior",
+                          "target_share_cur", "pos_baseline"]])
+        except Exception as exc:
+            print(f"  ! {season}: {type(exc).__name__}: {exc}")
+
+    hist = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    if hist.empty:
+        return hist
+    for lv in shrinkage_levels:
+        pred = (1 - lv) * hist["target_share_prior"] + lv * hist["pos_baseline"]
+        hist[f"abs_err_shrink_{lv}"] = (pred - hist["target_share_cur"]).abs()
+    return hist
+
+
+def hc_change_shrinkage_summary(hist: pd.DataFrame,
+                                shrinkage_levels: tuple[float, ...] = _HC_SHRINKAGE_LEVELS) -> dict:
+    """Score hc_change_shrinkage_backtest's output: which shrinkage level (if any)
+    predicts the coaching-change cohort's real target_share best?
+
+    `improvement_vs_no_shrinkage` = mean absolute error at shrinkage=0.0 (trust the
+    player's own history fully, today's behavior) minus the best level found --
+    positive means some real shrinkage toward the position baseline predicts
+    better than fully trusting a coaching-change player's own recent history, and
+    is worth wiring into the live projection. Near zero or negative means shrinkage
+    doesn't actually help even for this specific, already-validated-as-volatile
+    cohort, and the discount shouldn't be built despite hc_change_role_volatility's
+    positive result -- knowing a group is *more volatile* doesn't automatically
+    mean a specific correction *reduces error* for them.
+
+    A 2021-2025 run (141 coaching-change players) found a real but modest, only
+    borderline-significant effect -- a genuinely different, weaker verdict than
+    hc_change_role_volatility's clean positive: light shrinkage (0.2, i.e.
+    80% own history / 20% position baseline) minimized error at 0.0407 vs.
+    no-shrinkage's 0.0428 (+0.0021, ~5% relative). Error rises past that --
+    aggressive shrinkage (1.0, ignore his own history entirely) is worse than no
+    shrinkage at all (0.0606), meaning a coaching-change player's own talent/role
+    still carries real signal that full reversion throws away. The 95% CI is
+    [0.0, +0.0039] -- the lower bound touching exactly zero, and that's before
+    accounting for the fact that this CI re-picks whichever level looks best in
+    each resample rather than testing one level fixed in advance (a "best of
+    several tries" comparison, which reads more confident than a single
+    pre-committed one would). Real, but not the clean win hc_change_role_volatility
+    was -- a judgment call whether a ~5% error reduction this marginal is worth
+    wiring into the live projection.
+    """
+    if hist.empty:
+        return {"n_players": 0}
+    errs = {lv: float(hist[f"abs_err_shrink_{lv}"].mean())
+           for lv in shrinkage_levels if f"abs_err_shrink_{lv}" in hist.columns}
+    best = min(errs, key=errs.get) if errs else None
+    baseline_err = errs.get(0.0)
+    return {
+        "n_players": int(len(hist)),
+        "seasons": sorted(int(s) for s in hist["season"].unique()),
+        "mean_abs_error_by_shrinkage": errs,
+        "best_shrinkage": best,
+        "best_mean_abs_error": errs.get(best) if best is not None else None,
+        "no_shrinkage_mean_abs_error": baseline_err,
+        "improvement_vs_no_shrinkage": (baseline_err - errs[best])
+                                       if best is not None and baseline_err is not None else None,
+    }
+
+
 def repeat_value_players(hist: pd.DataFrame, min_seasons: int = 2) -> pd.DataFrame:
     """Players who beat their draft slot repeatedly rather than once.
 
