@@ -314,6 +314,11 @@ def who_should_i_pick(limit: int = 6) -> str:
     bookkeeping: bye-week collisions with players you already own, over-exposure to
     one real NFL team, and handcuff insurance value for a backup behind your own
     running back.
+
+    A TE whose team allowed heavy pressure last year (and who is still on it) carries a
+    `pressure_note`: his prior volume was partly checkdowns under pressure and tends to regress
+    (pressure_usage_backtest). It is shown, not scored -- it never changes the rank -- and only
+    appears for TEs in the worst or best quartile of team pressure allowed.
     """
     league, _ = _settings()
     state = _state()
@@ -336,15 +341,20 @@ def who_should_i_pick(limit: int = 6) -> str:
     alternatives = model.likely_alternative_by_position(avail, current, after)
 
     picks = []
+    pctx = _pressure_usage_ctx() if (recs["position"] == "TE").any() else None
     for _, r in recs.iterrows():
-        picks.append({
+        pick = {
             "player": r["name"], "position": r["position"], "team": r.get("team"),
             "adp": round(float(r["adp"]), 1),
             "proj_points": round(float(r["proj_points"]), 1),
             "consistency": round(float(r["consistency"]), 3),
             "survives_to_next_pick": round(float(r["p_available_next"]), 2),
             "why": model.explain(r),
-        })
+        }
+        note = _pressure_usage_note(r, pctx)
+        if note:
+            pick["pressure_note"] = note
+        picks.append(pick)
     return json.dumps({
         "evaluating_pick": current,
         "round": (current - 1) // league.teams + 1,
@@ -1960,6 +1970,57 @@ def prewarm(verbose: bool = True) -> str:
         out["step_seconds"] = timings
         out["disk_cache"] = sources.cache_status()
     return json.dumps(out, indent=2, default=str)
+
+
+# From pressure_usage_backtest (2022-2025): a TE's targets per game fall by about this much per SD of how
+# much pressure his team allowed the year before (his prior volume was partly checkdowns under pressure).
+# PCT_SD is the spread of a percentile rank, so z = (pct - 0.5) / PCT_SD.
+_TE_TARGET_EFFECT_PER_SD = -0.30
+_PCT_SD = 0.29
+
+
+def _pressure_usage_ctx() -> dict | None:
+    """Last season's team pressure percentiles, each player's prior team, and his own share of targets that
+    came under pressure. None on any failure: this decorates a recommendation, it must never break one."""
+    try:
+        prior = CURRENT_SEASON - 1
+        prot = cov_mod.team_protection([prior]).set_index("team")
+        rate = prot["pressure_rate_ex_sack"]
+        w = sources.weekly_stats([prior])
+        w = w[w["season_type"] == "REG"]
+        prev_team = w.sort_values("week").groupby("player_id")["recent_team"].last().replace(sources._TEAM_CODE_FIX)
+        pe = cov_mod.player_pressure_exposure()
+        return {"prior": prior, "pct": rate.rank(pct=True), "rank_worst": rate.rank(ascending=False, method="min"),
+                "rate": rate, "prev_team": prev_team, "exposure": pe[pe["season"] == prior].set_index("player_id")}
+    except Exception:
+        return None
+
+
+def _pressure_usage_note(r: pd.Series, ctx: dict | None) -> dict | None:
+    """A volume-regression note for a TE whose team allowed heavy pressure last year (or little, the other
+    way) and who is still on that team. Informational: it does not touch the score or the rank.
+    Only TEs, because that is the only position where it held up (RB same sign but not significant; WR nothing)."""
+    if not ctx or r.get("position") != "TE":
+        return None
+    team, pid = r.get("team"), r.get("player_id")
+    if ctx["prev_team"].get(pid) != team or team not in ctx["pct"].index:
+        return None  # the effect is about staying in the same offense
+    pct = float(ctx["pct"][team])
+    if 0.25 < pct < 0.75:
+        return None
+    delta = _TE_TARGET_EFFECT_PER_SD * (pct - 0.5) / _PCT_SD
+    own = ctx["exposure"]["press_share"].get(pid)
+    worst = pct >= 0.75
+    return {
+        "signal": ("last year's volume may be pressure-inflated: expect some regression" if worst
+                   else "protected last year: his volume was not checkdown-inflated"),
+        "team_pressure_allowed": f"{ctx['rate'][team]:.1f}% of dropbacks (ex-sack) in {ctx['prior']}: rank "
+                                 f"{int(ctx['rank_worst'][team])} of {len(ctx['rate'])} (1 = most pressure allowed)",
+        "own_share_of_targets_under_pressure_pct": None if own is None or pd.isna(own) else round(100 * float(own), 1),
+        "typical_target_change_per_game": round(float(delta), 2),
+        "caveat": "small and post-hoc (pressure_usage_backtest): about 0.3 targets/game per SD, roughly a third of a "
+                  "half-PPR point per game; a tiebreaker between close TEs, not a reason to move one up or down a round.",
+    }
 
 
 def _coverage_snapshot(r: pd.Series) -> dict | None:

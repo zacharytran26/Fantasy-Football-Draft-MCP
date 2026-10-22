@@ -70,6 +70,11 @@ you're on the clock and want the full picture at once.
 The main one. Returns ranked recommendations with reasoning, the pick being evaluated,
 your roster, and each player's odds of surviving to your next pick.
 
+A TE whose team allowed heavy pressure last year (and who is still on it) carries a `pressure_note`:
+his prior volume was partly checkdowns under pressure and tends to regress (about -0.3 targets/game per SD
+of team pressure; see `pressure_usage_backtest`). Shown only for TEs in the worst or best quartile of team
+pressure allowed. It never changes the score or the rank: a tiebreaker between close TEs.
+
 ### `best_available`
 Next best on the board. `sort_by`: `draft_score` (balanced), `vor`, `consistency`,
 `proj_points`, or `value` (biggest ADP-to-model gap). Filter with `position`.
