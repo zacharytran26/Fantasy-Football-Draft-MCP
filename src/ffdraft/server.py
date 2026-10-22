@@ -811,6 +811,38 @@ def pressure_rebound_backtest(seasons: str = "2022,2023,2024,2025", tail: float 
 
 
 @mcp.tool()
+def pressure_usage_backtest(position: str = "TE", seasons: str = "2022,2023,2024,2025") -> str:
+    """Do last season's pressure conditions predict a change in a player's volume this season?
+
+    RBs and TEs live on dump-offs and short targets while WRs carry the chunk plays, and pressure
+    pushes the ball toward the former (RB share of targets +3-5 points, TE flat, WR targets go much
+    deeper), so a points total can hide opposite effects. This tests usage directly: targets and
+    receiving yards per game, beyond last season's own value, for players still on the same team,
+    against (a) the team's pressure rate allowed last season, (b) the player's own share of targets
+    that came under pressure, and (c) his share within 2 air yards. Effects are per SD with
+    team-season bootstrap CIs, plus the change in out-of-sample squared error (fit on other seasons).
+
+    2022-2025 result: TEs on teams with heavy pressure last year fall back (about -0.30 targets per
+    game per SD, CI excludes zero, ~4% lower out-of-sample error; own pressured share agrees at -0.22),
+    i.e. prior TE volume was partly inflated by checkdowns. The dump-off share itself does not predict.
+    RB points the same way but is not significant, and WR shows nothing. Small and post-hoc: a tiebreaker
+    for TEs, not a driver.
+    """
+    yrs = [int(x) for x in seasons.split(",") if x.strip()]
+    if position.upper() not in ("RB", "TE", "WR"):
+        return json.dumps({"error": "position must be RB|TE|WR"})
+    try:
+        out = cov_mod.summarize_pressure_usage(cov_mod.pressure_usage_frame(yrs), position)
+    except Exception as exc:
+        return json.dumps({"error": f"coverage data unavailable: {type(exc).__name__}: {exc}"})
+    out["interpretation"] = ("effect_per_sd = change in this season's per-game volume per 1 SD of the feature, beyond last "
+                             "season's volume; negative for TE means pressure-inflated volume regresses. oos_mse_change_pct < 0 "
+                             "means the feature improved out-of-sample prediction. Sacks are untagged before 2023, so team "
+                             "pressure uses the ex-sack rate.")
+    return json.dumps(out, indent=2)
+
+
+@mcp.tool()
 def value_picks(limit: int = 20, direction: str = "undervalued") -> str:
     """Where the model disagrees with the draft market, on draftable players only.
 

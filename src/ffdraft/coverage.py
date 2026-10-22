@@ -657,3 +657,87 @@ def summarize_pressure_rebound(h: pd.DataFrame, tail: float = 0.2, n_boot: int =
         "corr_prior_pressure_vs_change": round(float(teams["prior_pressure"].corr(teams["same_pressure"] - teams["prior_pressure"])), 2),
         "corr_prior_vs_same_pressure": round(float(teams["prior_pressure"].corr(teams["same_pressure"])), 2)}
     return out
+
+
+def player_pressure_exposure() -> pd.DataFrame:
+    """Per player-season, from tagged-coverage targets: how much of his volume came under pressure
+    (`press_share`) and how much was within 2 air yards (`short_share`, dump-offs)."""
+    t = _raw()["targets"]
+    g = t.groupby(["season", "player_id"]).agg(n_tagged=("comp", "size"),
+                                               press_share=("pocket", lambda x: float((x == "pressured").mean())),
+                                               short_share=("air", lambda x: float((x <= 2).mean())))
+    return g.reset_index()
+
+
+def pressure_usage_frame(seasons, min_games: int = 6, min_targets: int = 20, min_tagged: int = 25) -> pd.DataFrame:
+    """Same-team player-seasons with this season's and last season's receiving volume, the player's own
+    prior pressure/dump-off exposure, and his team's prior-season pressure rate.
+
+    Usage is targets and receiving yards per game, not fantasy points: a pressured QB checks down, so
+    RB and TE volume (many short targets) and WR yield (fewer, deeper ones) can move in opposite
+    directions and net out to nothing in a points total."""
+    pe = player_pressure_exposure()
+    frames = []
+    for season in seasons:
+        ctx = _team_season_context(season)
+
+        def comp(y):
+            w = sources.weekly_stats([y])
+            w = w[(w["season_type"] == "REG") & w["position"].isin(["WR", "TE", "RB"])].copy()
+            w["team"] = w["recent_team"].replace(sources._TEAM_CODE_FIX)
+            g = w.groupby("player_id").agg(position=("position", "first"), games=("week", "nunique"),
+                                           tgt=("targets", "sum"), yds=("receiving_yards", "sum"), team=("team", "last"))
+            g = g[(g["games"] >= min_games) & (g["tgt"] >= min_targets)].copy()
+            g["tgt_g"], g["yds_g"] = g["tgt"] / g["games"], g["yds"] / g["games"]
+            return g
+
+        cur, prv = comp(season), comp(season - 1)
+        p1 = pe[pe["season"] == season - 1].set_index("player_id")[["n_tagged", "press_share", "short_share"]].add_suffix("_p")
+        m = (cur.join(prv[["tgt_g", "yds_g", "team"]].add_suffix("_p"), how="inner").join(p1, how="left")
+             .reset_index().merge(ctx, on="team", how="left"))
+        m["stayed"] = m["team"] == m["team_p"]
+        m["season"] = season
+        frames.append(m)
+    h = pd.concat(frames, ignore_index=True).dropna(subset=["prior_pct", "press_share_p"])
+    return h[h["stayed"] & (h["n_tagged_p"] >= min_tagged)].reset_index(drop=True)
+
+
+def _mse(y, pred) -> float:
+    return float(np.mean((np.asarray(y) - np.asarray(pred)) ** 2))
+
+
+def summarize_pressure_usage(h: pd.DataFrame, position: str = "TE", n_boot: int = 800, seed: int = 0) -> dict:
+    """Do last season's pressure conditions predict a change in this season's volume, beyond last
+    season's volume? For each outcome (targets/g, receiving yards/g) and each feature (team pressure
+    percentile, the player's own pressured-target share, his dump-off share): the effect per SD with a
+    team-season bootstrap CI, and the out-of-sample change in squared error (fit on other seasons)."""
+    g = h[h["position"] == position.upper()].reset_index(drop=True)
+    if len(g) < 40:
+        return {"position": position.upper(), "error": "not enough same-team player-seasons"}
+    feats = {"team_pressure_allowed_prior": "prior_pct", "own_pressured_target_share_prior": "press_share_p",
+             "own_dumpoff_share_prior": "short_share_p"}
+    for col in feats.values():
+        g[col + "_z"] = (g[col] - g[col].mean()) / g[col].std(ddof=0)
+    rng = np.random.default_rng(seed)
+    clusters = [d for _, d in g.groupby(["team", "season"])]
+    out = {"position": position.upper(), "n_player_seasons": int(len(g)), "n_teams": int(g["team"].nunique()),
+           "seasons": sorted(int(x) for x in g["season"].unique()), "outcomes": {}}
+    for oc, prior in (("tgt_g", "tgt_g_p"), ("yds_g", "yds_g_p")):
+        out["outcomes"][oc] = {}
+        for name, col in feats.items():
+            cols = [prior, col + "_z"]
+            beta = _ols(g[cols].to_numpy(), g[oc].to_numpy())
+            boots = []
+            for _ in range(n_boot):
+                d = pd.concat([clusters[i] for i in rng.integers(0, len(clusters), len(clusters))])
+                boots.append(_ols(d[cols].to_numpy(), d[oc].to_numpy())[2])
+            pred, base = np.zeros(len(g)), np.zeros(len(g))
+            for s_ in g["season"].unique():
+                tr, te = g[g["season"] != s_], g[g["season"] == s_]
+                pred[te.index] = _predict(_ols(tr[cols].to_numpy(), tr[oc].to_numpy()), te[cols].to_numpy())
+                base[te.index] = _predict(_ols(tr[[prior]].to_numpy(), tr[oc].to_numpy()), te[[prior]].to_numpy())
+            lo, hi = np.percentile(boots, [2.5, 97.5])
+            out["outcomes"][oc][name] = {"effect_per_sd": round(float(beta[2]), 3), "ci95": [round(float(lo), 3), round(float(hi), 3)],
+                                         "excludes_zero": bool(lo > 0 or hi < 0),
+                                         "oos_mse_change_pct": round(100 * (_mse(g[oc], pred) / _mse(g[oc], base) - 1), 1)}
+    return out

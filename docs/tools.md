@@ -175,6 +175,17 @@ season (not knowable in August) to check the mechanism. 2022-2025: the mechanism
 the mechanics predict for WRs and +0.75 is observed, but every interval for the usable rule includes
 zero and TE/RB point the other way. Unconfirmed, so it is not used in rankings.
 
+### `pressure_usage_backtest`
+Do last season's pressure conditions predict a change in this season's **volume**? RBs and TEs live on
+dump-offs while WRs carry chunk plays, and pressure pushes the ball toward the former, so a points
+total can hide opposite effects. Tests targets and receiving yards per game, beyond last season's own
+value, for same-team players, against the team's pressure rate allowed, the player's own pressured-target
+share, and his within-2-air-yard share (team-season bootstrap CIs, out-of-sample squared error). 2022-2025:
+TEs on teams with heavy pressure last year fall back (about -0.30 targets/game per SD, CI excludes zero,
+~4% lower out-of-sample error; the player's own pressured share agrees at -0.22), i.e. last year's TE
+volume was partly inflated by checkdowns. The dump-off share itself doesn't predict. RB has the same sign but
+is not significant; WR shows nothing. Small and post-hoc, so a TE tiebreaker, not a driver.
+
 ### `coverage_roles`
 Target share by role against each coverage. X = a team's most-targeted WR, Z = second,
 Slot = third, Y = most-targeted TE, RB = any back -- target-rank stand-ins, not alignment.

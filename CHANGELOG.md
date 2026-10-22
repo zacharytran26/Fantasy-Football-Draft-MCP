@@ -34,6 +34,13 @@ All notable changes to this project. Format follows
   top. The value backtest now also tests the QB/protection side (prior-season team pressure rate, and
   its interaction with the man/zone gap): no improvement for WR, TE or RB. Sacks have no coverage tag
   before 2023, so pocket tables warn on earlier windows and the team pressure feature uses the ex-sack rate.
+- New `pressure_usage_backtest`, answering "RBs and TEs live on dump-offs while WRs carry chunk plays":
+  tests volume (targets and receiving yards per game) instead of points, because pressure shifts targets
+  toward checkdowns and a points total can hide opposite effects. At the play level, 74% of clean-pocket RB
+  targets are within 2 air yards, and under pressure WR targets go much deeper (aDOT 13.2 vs 9.9). Predictively, TEs on
+  teams that allowed heavy pressure last year see fewer targets per game the next (-0.30 per SD, CI
+  [-0.49, -0.11], ~4% lower out-of-sample error; own pressured share -0.22), i.e. pressure-inflated TE volume regresses.
+  RB same sign, not significant; WR nothing; the dump-off share itself doesn't predict.
 - New `pressure_rebound_backtest`: do skill players on a team with bad protection last year bounce back
   (worst vs best quintile of pressure allowed, same-team players, ppg residual after prior ppg,
   team-season bootstrap)? Unconfirmed for WR (+0.75 ppg [-0.25, +1.88], about what the mechanics
