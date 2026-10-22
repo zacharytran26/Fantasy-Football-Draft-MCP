@@ -26,6 +26,15 @@ All notable changes to this project. Format follows
   pick, `best_available` and `compare_players` gain `man_yps`/`zone_yps` columns, and
   `prewarm` builds the coverage data so nothing downloads on the clock. A coverage failure
   never breaks a recommendation.
+- New `coverage_value_backtest` (repo-style, prior-season inputs only, out-of-sample): adding
+  a player's man-minus-zone gap, alone or interacted with how man-heavy his schedule is, to his
+  prior points per game does NOT improve next-season prediction for WR, TE or RB (effects
+  straddle zero; out-of-sample Spearman unchanged or slightly worse). Schedule man-exposure
+  varies only ~2 points across teams, so it cannot move RB/WR target share (+0.15 pts of
+  share per SD, CI [-0.5, +0.7]). The draft-flow coverage block therefore carries numbers
+  only: the earlier "better vs man / better vs zone" verdict was removed as it implied a signal
+  that isn't there. The source's coverage tags also drift between seasons (league man share
+  30/29/44/50/31% for 2021-2025); noted in the docs.
 - **Informational only, not in `draft_score`.** `coverage_split_backtest` finds a player's
   man-minus-zone gap barely repeats season to season (WR rank correlation roughly 0.0-0.25
   on 45-58 players per season pair), so it fails the same bar `matchup_z` did. The stable

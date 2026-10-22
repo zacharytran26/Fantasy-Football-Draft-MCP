@@ -207,6 +207,18 @@ Two things hold up, and one doesn't:
 - **Holds (rookie alignment, small samples):** from the slot, rookies are targeted far more
   often against man than zone; the top slot and outside producers against man separate
   clearly from the rest. Roles beyond the 2023-2025 rookie classes have no open alignment data.
+- **Does not hold (schedule exposure):** a team's schedule varies by only ~2 points of man
+  exposure (SD), because each team plays 17 opponents. The man-coverage effect on RB target
+  share is real within a game, but scaled by that spread it is ~0.15 points of share; the
+  backtest estimate is +0.15 [-0.49, +0.74] (RB) and -0.01 [-1.08, +1.12] (WR).
+- **Does not hold (prediction):** `coverage_value_backtest` (2023-2025, prior-season inputs
+  only, out-of-sample) adds a player's man-minus-zone gap, and its interaction with schedule
+  man-exposure, to his prior points per game. WR lean +0.17 ppg/SD [-0.14, +0.47], TE -0.05
+  [-0.29, +0.18], RB -0.06 [-1.02, +0.64]; out-of-sample Spearman did not improve for any
+  position (WR 0.720 -> 0.717, TE 0.721 -> 0.712, RB 0.721 -> 0.714). Coverage is context.
+- **Data caveat:** the coverage tags are not consistent across seasons (league man share
+  30%, 29%, 44%, 50%, 31% for 2021-2025), so use within-season ranks and pooled windows, never a
+  raw man rate as a trend.
 - **Does not hold (individual players):** a player's man-minus-zone gap barely repeats from one
   season to the next (`coverage_split_backtest`; WR rank correlation roughly 0.0-0.25 on 45-58
   players per pair, TE/RB noisier). So `coverage_report` is informational and nothing in

@@ -145,6 +145,13 @@ block (man vs zone yards/snap, target rate, catch % against the position average
 to every WR/TE/RB recommendation, `on_the_clock` appends the full report for the top pick,
 and `best_available` / `compare_players` show `man_yps` / `zone_yps` columns. `prewarm` builds the data.
 
+### `coverage_value_backtest`
+Leakage-free backtest in the style of `matchup_backtest`: does a player's man-vs-zone gap
+(alone, or interacted with how man-heavy his schedule is) improve on his own prior points per
+game at predicting next season's output? Effects in points per game per SD with
+player-clustered bootstrap CIs, plus out-of-sample Spearman and top-N precision. Over
+2023-2025 it does not for WR, TE or RB, which is why coverage stays context only.
+
 ### `coverage_roles`
 Target share by role against each coverage. X = a team's most-targeted WR, Z = second,
 Slot = third, Y = most-targeted TE, RB = any back -- target-rank stand-ins, not alignment.

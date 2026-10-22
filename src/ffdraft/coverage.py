@@ -12,6 +12,10 @@ Limits worth knowing before trusting a number:
   * Exposure is *snaps on the field*, not routes run. It includes snaps spent blocking,
     so `tpps` (targets per pass snap) understates true TPRR, most for TEs and RBs.
     Compare a player's man split to his own zone split, or to players at his position.
+  * The tags are not consistent across seasons: league-wide man share reads 30%, 29%, 44%,
+    50%, 31% for 2021-2025 (Cover 1 alone swings 23% -> 37% -> 22%), far more than real scheme
+    change. Pooled-window comparisons are fine (every player shares the same tags), and the
+    backtests use within-season ranks, but do not read a raw man rate across seasons as a trend.
   * Receiver *alignment* (X / Z / slot) is not in any open dataset. `role_table` assigns
     roles by target rank within a team-season as a stand-in -- see its docstring.
     True alignment exists only for the 2023-2025 rookie classes (alignment.py).
@@ -109,7 +113,9 @@ def build_raw(pbp: pd.DataFrame, part: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 
 def _raw(seasons=None) -> dict[str, pd.DataFrame]:
-    seasons = _default_seasons(seasons)
+    """Aggregates for the full lookback window, shared by every caller. Callers filter by
+    season themselves, so a 3-season view and a backtest reuse one download and one cache."""
+    seasons = list(SEASONS)
     key = f"{min(seasons)}_{max(seasons)}"
     names = ("player", "team_def", "targets")
     built: dict = {}
@@ -260,7 +266,7 @@ def split_persistence(position: str = "WR", seasons=None, min_snaps: int = 120) 
     p = _raw(seasons)["player"]
     pos = _positions().set_index("player_id")["position"].replace({"FB": "RB"})
     p = p.assign(position=p["player_id"].map(pos))
-    p = p[p["position"] == position.upper()].copy()
+    p = p[(p["position"] == position.upper()) & p["season"].isin(seasons)].copy()
     p["mz"] = np.where(p["cov"].isin(MAN), "man", "zone")
     g = p.groupby(["season", "player_id", "mz"])[_SUMS].sum()
     st = _stats(g).unstack("mz")
@@ -280,3 +286,152 @@ def split_persistence(position: str = "WR", seasons=None, min_snaps: int = 120) 
                                   "spearman": round(rho, 2) if np.isfinite(rho) else None})
         res[metric] = pairs
     return {"position": position.upper(), "min_snaps_each_coverage": min_snaps, "year_to_year_gap_persistence": res}
+
+
+# ----------------------------------------------------------------------------- backtests
+
+def defense_man_rate() -> pd.DataFrame:
+    """Share of each defense's tagged dropbacks that were man coverage, per team-season."""
+    td = _raw()["team_def"].copy()
+    td["man"] = td["cov"].isin(MAN)
+    g = td.groupby(["season", "defteam"]).apply(
+        lambda d: pd.Series({"man_rate": 100 * d.loc[d["man"], "plays"].sum() / d["plays"].sum(),
+                             "plays": d["plays"].sum()}), include_groups=False).reset_index()
+    return g.rename(columns={"defteam": "team"})
+
+
+def schedule_man_exposure(season: int, prior_window: int = 2) -> pd.DataFrame:
+    """How man-heavy a team's schedule is, from opponents' coverage in PRIOR seasons only.
+
+    The schedule is public in May, so who a team plays is legitimately known; each
+    opponent's man rate is pooled over the `prior_window` seasons before `season`, so
+    nothing from the season being predicted leaks in. `sched_man_z` is standardised
+    across teams that season."""
+    rates = defense_man_rate()
+    prior = rates[rates["season"].isin(range(season - prior_window, season))]
+    opp = (prior.assign(m=prior["man_rate"] * prior["plays"]).groupby("team")
+           .apply(lambda d: d["m"].sum() / d["plays"].sum(), include_groups=False).rename("opp_man"))
+    sch = sources.schedules()
+    sch = sch[(sch["season"] == season) & (sch["game_type"] == "REG")]
+    games = pd.concat([sch[["home_team", "away_team"]].set_axis(["team", "opp"], axis=1),
+                       sch[["away_team", "home_team"]].set_axis(["team", "opp"], axis=1)])
+    games["opp_man"] = games["opp"].map(opp)
+    out = games.groupby("team")["opp_man"].mean().rename("sched_man").reset_index()
+    out["sched_man_z"] = (out["sched_man"] - out["sched_man"].mean()) / out["sched_man"].std(ddof=0)
+    return out
+
+
+def coverage_value_backtest(seasons, position: str = "WR", sc=None, prior_window: int = 3,
+                            min_snaps: int = 100, min_games: int = 6) -> pd.DataFrame:
+    """Would knowing a player's man/zone profile in August have helped predict his
+    next-season fantasy output beyond what his own prior production already says?
+
+    Same discipline as adp.matchup_value_backtest: nothing here has seen the season it
+    scores. For each `season`: talent = that player's points per game the year before;
+    coverage features come from the `prior_window` seasons before it (man vs zone yards
+    per snap, and their gap `lean`); `sched_man_z` is how man-heavy the player's team
+    schedule is, from opponents' prior-season coverage. The target is points per game
+    in `season` for players with at least `min_games` games (coverage should not be
+    credited or blamed for injuries)."""
+    from .adp import season_finish
+    from .config import Scoring
+    sc = sc or Scoring()
+    position = position.upper()
+    frames = []
+    for season in seasons:
+        prior = [y for y in range(season - prior_window, season) if y in SEASONS]
+        if not prior:
+            continue
+        sp = player_splits(prior)
+        sp = sp[(sp["position"] == position) & (sp["man_snaps"] >= min_snaps) & (sp["zone_snaps"] >= min_snaps)]
+        sp = sp[["player_id", "man_yps", "zone_yps", "man_tpps", "zone_tpps"]].copy()
+        sp["lean"] = sp["man_yps"] - sp["zone_yps"]
+        pf = season_finish(season - 1, sc)
+        pf = pf[(pf["position"] == position) & (pf["games"] >= min_games)][["player_id", "ppg"]]
+        pf = pf.rename(columns={"ppg": "prior_ppg"})
+        fin = season_finish(season, sc)
+        fin = fin[(fin["position"] == position) & (fin["games"] >= min_games)][["player_id", "name", "points", "ppg"]]
+        w = sources.weekly_stats([season])
+        team_of = (w[w["position"] == position].sort_values("week").groupby("player_id")["recent_team"]
+                   .last().rename("team").reset_index())
+        team_of["team"] = team_of["team"].replace(sources._TEAM_CODE_FIX)
+        m = (fin.merge(pf, on="player_id").merge(sp, on="player_id").merge(team_of, on="player_id", how="left")
+             .merge(schedule_man_exposure(season)[["team", "sched_man_z"]], on="team", how="left"))
+        m["sched_man_z"] = m["sched_man_z"].fillna(0.0)
+        m["season"] = season
+        frames.append(m)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _ols(X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    return np.linalg.lstsq(np.column_stack([np.ones(len(X)), X]), y, rcond=None)[0]
+
+
+def _predict(beta: np.ndarray, X: np.ndarray) -> np.ndarray:
+    return np.column_stack([np.ones(len(X)), X]) @ beta
+
+
+def _spearman(a, b) -> float:
+    return float(pd.Series(np.asarray(a)).rank().corr(pd.Series(np.asarray(b)).rank()))
+
+
+def summarize_value_backtest(h: pd.DataFrame, top_n: int = 24, n_boot: int = 1000, seed: int = 0) -> dict:
+    """Does coverage add anything to prior production? Two views, both on out-of-sample data.
+
+    1. Coefficients: ppg ~ prior_ppg + lean_z + sched_z + lean_z*sched_z, with a bootstrap
+       over *players* (a player appears in up to three seasons, so rows aren't independent).
+       Effects are in fantasy points per game per 1 SD of the feature.
+    2. Out-of-sample ranking: for each season, fit on the OTHER seasons and predict it.
+       Compare Spearman and top-N precision for prior_ppg alone vs. adding coverage.
+    """
+    h = h.dropna(subset=["ppg", "prior_ppg", "lean"]).copy()
+    if len(h) < 30 or h["season"].nunique() < 2:
+        return {"n_player_seasons": int(len(h)), "error": "not enough player-seasons"}
+    h["lean_z"] = (h["lean"] - h["lean"].mean()) / h["lean"].std(ddof=0)
+    h["inter"] = h["lean_z"] * h["sched_man_z"]
+    cols = {"M0 prior_ppg": ["prior_ppg"], "M1 +lean": ["prior_ppg", "lean_z"],
+            "M2 +lean +schedule x lean": ["prior_ppg", "lean_z", "sched_man_z", "inter"]}
+
+    def fit(df):
+        return _ols(df[cols["M2 +lean +schedule x lean"]].to_numpy(), df["ppg"].to_numpy())
+
+    beta = fit(h)
+    rng = np.random.default_rng(seed)
+    pids = h["player_id"].unique()
+    groups = {k: g for k, g in h.groupby("player_id")}
+    boots = []
+    for _ in range(n_boot):
+        samp = pd.concat([groups[k] for k in rng.choice(pids, len(pids))])
+        boots.append(fit(samp))
+    boots = np.array(boots)
+
+    def coef(i):
+        lo, hi = np.percentile(boots[:, i], [2.5, 97.5])
+        return {"ppg_per_sd": round(float(beta[i]), 3), "ci95": [round(float(lo), 3), round(float(hi), 3)],
+                "excludes_zero": bool(lo > 0 or hi < 0)}
+
+    oos = {k: [] for k in cols}
+    prec = {k: [] for k in cols}
+    pred_all = {k: pd.Series(index=h.index, dtype=float) for k in cols}
+    for s in sorted(h["season"].unique()):
+        tr, te = h[h["season"] != s], h[h["season"] == s]
+        for k, c in cols.items():
+            b = _ols(tr[c].to_numpy(), tr["ppg"].to_numpy())
+            pred_all[k].loc[te.index] = _predict(b, te[c].to_numpy())
+        actual_top = te["ppg"].rank(ascending=False, method="min") <= top_n
+        for k in cols:
+            top = pred_all[k].loc[te.index].sort_values(ascending=False).head(top_n).index
+            prec[k].append(float(actual_top.loc[top].mean()))
+    for k in cols:
+        oos[k] = _spearman(pred_all[k], h["ppg"])
+    base = "M0 prior_ppg"
+    return {
+        "n_player_seasons": int(len(h)), "n_players": int(len(pids)), "seasons": sorted(int(x) for x in h["season"].unique()),
+        "top_n": top_n,
+        "effect_of_lean": coef(2), "effect_of_schedule_x_lean": coef(4),
+        "oos_spearman": {k: round(v, 4) for k, v in oos.items()},
+        "oos_top_n_precision": {k: round(float(np.mean(v)), 4) for k, v in prec.items()},
+        "improvement_spearman_M1": round(oos["M1 +lean"] - oos[base], 4),
+        "improvement_spearman_M2": round(oos["M2 +lean +schedule x lean"] - oos[base], 4),
+        "improvement_precision_M2": round(float(np.mean(prec["M2 +lean +schedule x lean"]) - np.mean(prec[base])), 4),
+    }

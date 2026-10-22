@@ -112,11 +112,9 @@ class TestDraftFlowSummary:
         base = {"WR": {"man": {"yps": 1.5}, "zone": {"yps": 1.4}}}
         return {"by_id": {"p1": row}, "base": base}
 
-    def test_lean_needs_a_real_gap(self):
+    def test_no_verdict_is_attached_because_the_backtest_found_no_signal(self):
         from ffdraft.server import _coverage_summary
-        assert _coverage_summary("p1", self._ctx(2.5, 2.0))["lean"] == "better vs man"
-        assert _coverage_summary("p1", self._ctx(1.8, 2.3))["lean"] == "better vs zone"
-        assert _coverage_summary("p1", self._ctx(2.0, 1.9))["lean"] == "no real lean"
+        assert "lean" not in _coverage_summary("p1", self._ctx(3.5, 1.0))
 
     def test_reports_both_sides_against_the_position_average(self):
         from ffdraft.server import _coverage_summary
@@ -128,3 +126,25 @@ class TestDraftFlowSummary:
         from ffdraft.server import _coverage_summary
         assert _coverage_summary("zzz", self._ctx(2, 2)) is None
         assert _coverage_summary("p1", None) is None
+
+
+class TestValueBacktest:
+    def _frame(self, effect, n=240, seed=3):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        df = pd.DataFrame({"player_id": [f"p{i % 120}" for i in range(n)], "season": [2023 + (i % 3) for i in range(n)],
+                           "prior_ppg": rng.normal(12, 4, n), "lean": rng.normal(0, 0.5, n), "sched_man_z": rng.normal(0, 1, n)})
+        lean_z = (df["lean"] - df["lean"].mean()) / df["lean"].std(ddof=0)
+        df["ppg"] = 2 + 0.8 * df["prior_ppg"] + effect * lean_z + rng.normal(0, 2, n)
+        return df
+
+    def test_a_planted_effect_is_detected_and_improves_ranking(self):
+        r = cv.summarize_value_backtest(self._frame(effect=2.0), top_n=20, n_boot=300)
+        assert r["effect_of_lean"]["excludes_zero"] and r["improvement_spearman_M1"] > 0
+
+    def test_pure_noise_is_not_reported_as_signal(self):
+        r = cv.summarize_value_backtest(self._frame(effect=0.0), top_n=20, n_boot=300)
+        assert not r["effect_of_lean"]["excludes_zero"] and r["improvement_spearman_M1"] < 0.02
+
+    def test_too_few_rows_say_so_instead_of_fitting(self):
+        assert "error" in cv.summarize_value_backtest(self._frame(1.0, n=12), n_boot=10)

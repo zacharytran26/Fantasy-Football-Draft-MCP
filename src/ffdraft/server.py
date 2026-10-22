@@ -552,10 +552,9 @@ _COVERAGE_COLS = ["name", "position", "team", "overall_rank", "adp", "man_snaps"
                   "man_yps", "zone_yps", "man_epa_t", "zone_epa_t", "diff_yps", "diff_tpps"]
 
 _COVERAGE_WARNING = (
-    "A player's man-minus-zone gap barely repeats year to year (see coverage_split_backtest: "
-    "WR rank correlation ~0.0-0.25 on ~50 players), so treat an individual's split as context, "
-    "not a reason to move him up the board. The position- and role-level patterns in "
-    "coverage_roles are the stable part. Informational only -- not part of draft_score.")
+    "Context only. A player's man-minus-zone gap barely repeats year to year (coverage_split_backtest), and adding it to "
+    "his prior points per game did not improve next-season prediction for WR, TE or RB, alone or interacted with how "
+    "man-heavy his schedule is (coverage_value_backtest). Not part of draft_score.")
 
 
 @mcp.tool()
@@ -700,6 +699,44 @@ def coverage_split_backtest(position: str = "WR", min_snaps: int = 120, window: 
         return json.dumps(cov_mod.split_persistence(position, seasons, min_snaps), indent=2)
     except Exception as exc:
         return json.dumps({"error": f"coverage data unavailable: {type(exc).__name__}: {exc}"})
+
+
+@mcp.tool()
+def coverage_value_backtest(seasons: str = "2023,2024,2025", position: str = "WR", top_n: int | None = None,
+                            prior_window: int = 3) -> str:
+    """Backtest: does man-vs-zone information improve on a player's own prior production?
+
+    Leakage-free, in the style of matchup_backtest. For each season, talent is the
+    player's points per game the year before; coverage features come only from the
+    `prior_window` seasons before it (man vs zone yards per snap and their gap,
+    `lean`); `sched_man_z` is how man-heavy his team's schedule is, from opponents'
+    PRIOR-season coverage. Target: points per game that season (6+ games).
+
+    Returns (1) the effect of lean and of schedule-x-lean in fantasy points per game per
+    SD with player-clustered bootstrap CIs, and (2) out-of-sample Spearman and top-N
+    precision for prior production alone vs. with coverage added. Positive improvement
+    would justify using coverage in a ranking; near zero or negative, as found for WR,
+    TE and RB over 2023-2025, means it is context only.
+
+    Caveat: the source's coverage tags are not consistent across seasons (league-wide man
+    share reads 30%, 29%, 44%, 50%, 31% for 2021-2025), so cross-season comparisons rely
+    on within-season ranks.
+    """
+    yrs = [int(x) for x in seasons.split(",") if x.strip()]
+    pos = position.upper()
+    n = top_n or {"WR": 24, "RB": 24, "TE": 12}.get(pos, 24)
+    try:
+        h = cov_mod.coverage_value_backtest(yrs, pos, prior_window=prior_window)
+        if h.empty:
+            return json.dumps({"error": "no backtest data for those seasons"})
+        out = cov_mod.summarize_value_backtest(h, top_n=n)
+    except Exception as exc:
+        return json.dumps({"error": f"coverage data unavailable: {type(exc).__name__}: {exc}"})
+    out["position"] = pos
+    out["interpretation"] = ("effects are fantasy points per game per 1 SD of the feature; oos_* compare ranking next-season "
+                             "ppg using prior_ppg alone (M0) vs adding coverage (M1, M2). excludes_zero=false and "
+                             "non-positive improvements mean coverage adds nothing detectable.")
+    return json.dumps(out, indent=2)
 
 
 @mcp.tool()
@@ -1855,10 +1892,8 @@ def _coverage_summary(player_id, ctx: dict | None) -> dict | None:
         return {"yds_per_snap": x[f"{mz}_yps"], "target_rate_pct": x[f"{mz}_tpps"], "catch_pct": x[f"{mz}_catch"],
                 "snaps": int(x[f"{mz}_snaps"])}
 
-    gap = x["man_yps"] - x["zone_yps"]
     out = {"vs_man": side("man"), "vs_zone": side("zone"),
-           "position_avg_yds_per_snap": {"man": base.get("man", {}).get("yps"), "zone": base.get("zone", {}).get("yps")},
-           "lean": "better vs man" if gap >= 0.3 else "better vs zone" if gap <= -0.3 else "no real lean"}
+           "position_avg_yds_per_snap": {"man": base.get("man", {}).get("yps"), "zone": base.get("zone", {}).get("yps")}}
     al = align_mod.profile(player_id)
     if al:
         role = al["primary_role"]
@@ -1869,9 +1904,10 @@ def _coverage_summary(player_id, ctx: dict | None) -> dict | None:
     return out
 
 
-_COVERAGE_FLOW_NOTE = ("Coverage lines are context, not part of the score: a player's man-vs-zone gap barely "
-                       "repeats year to year (coverage_split_backtest), so use it to break ties. Target rate is per "
-                       "pass snap on the field; compare against the position average.")
+_COVERAGE_FLOW_NOTE = ("Coverage is context only, and a backtest says it does not predict next-season output: adding a "
+                       "player's man-vs-zone gap to his prior points per game did not improve out-of-sample ranking "
+                       "for WR, TE or RB (coverage_value_backtest). Target rate is per pass snap on the field; compare "
+                       "against the position average.")
 
 
 def _coverage_snapshot(r: pd.Series) -> dict | None:
@@ -1888,7 +1924,7 @@ def _coverage_snapshot(r: pd.Series) -> dict | None:
                     "man_ypt", "zone_ypt", "man_yps", "zone_yps", "man_epa_t", "zone_epa_t"]
             out["man_vs_zone"] = _rows(pd.DataFrame([x]), keep, 1)[0]
             out["position_baseline"] = cov_mod.position_baselines(seasons).get(x["position"])
-            out["caution"] = "individual man/zone gaps are mostly noise year to year -- see coverage_split_backtest"
+            out["caution"] = "context only: man/zone gaps neither repeat nor predict next-season output -- see coverage_value_backtest"
         al = align_mod.profile(r["player_id"])
         if al:
             out["alignment"] = al
