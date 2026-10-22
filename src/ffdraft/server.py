@@ -778,6 +778,39 @@ def pocket_report(team: str | None = None, side: str = "offense", window: int = 
 
 
 @mcp.tool()
+def pressure_rebound_backtest(seasons: str = "2022,2023,2024,2025", tail: float = 0.2) -> str:
+    """Backtest the rebound rule: do players on a team with bad pass protection last year bounce back?
+
+    The rule, using only what is known in August: take players still on a team that ranked in the
+    worst `tail` (default 20%) for pressure allowed last season, and compare their points-per-game
+    change with players still on a best-`tail` team. The comparison is the mean residual of ppg after
+    prior ppg, so ordinary regression to the mean is removed, and the confidence interval resamples
+    team-seasons (teammates share one offense). An `oracle` row uses the pressure the team actually
+    allowed that season, which is not knowable in August, to check whether the mechanism exists.
+
+    Result over 2022-2025 (ex-sack pressure rate, comparable across seasons): the mechanism is visible
+    for WR (about -0.34 ppg per SD of worse protection) and bad protection does revert toward average
+    (year-to-year r about 0.28), so a WR rebound of roughly +0.7 ppg is what the mechanics predict and
+    what is observed (+0.75), but every interval for the usable rule includes zero, and TE and RB point
+    the other way. Not confirmed; see the interpretation in the response.
+    """
+    yrs = [int(x) for x in seasons.split(",") if x.strip()]
+    if not 0.05 <= tail <= 0.5:
+        return json.dumps({"error": "tail must be between 0.05 and 0.5"})
+    try:
+        h = cov_mod.pressure_rebound_frame(yrs)
+        out = cov_mod.summarize_pressure_rebound(h, tail=tail)
+    except Exception as exc:
+        return json.dumps({"error": f"coverage data unavailable: {type(exc).__name__}: {exc}"})
+    out["seasons"] = yrs
+    out["interpretation"] = ("rebound_ppg = mean ppg residual (after prior ppg) of players on worst-protection teams minus "
+                             "players on best-protection teams; positive means bad protection last year predicts a bounce. "
+                             "Team pressure rate is a joint QB / line / scheme outcome. Sacks are excluded from the rate "
+                             "because they are untagged before 2023.")
+    return json.dumps(out, indent=2)
+
+
+@mcp.tool()
 def value_picks(limit: int = 20, direction: str = "undervalued") -> str:
     """Where the model disagrees with the draft market, on draftable players only.
 

@@ -34,6 +34,10 @@ All notable changes to this project. Format follows
   top. The value backtest now also tests the QB/protection side (prior-season team pressure rate, and
   its interaction with the man/zone gap): no improvement for WR, TE or RB. Sacks have no coverage tag
   before 2023, so pocket tables warn on earlier windows and the team pressure feature uses the ex-sack rate.
+- New `pressure_rebound_backtest`: do skill players on a team with bad protection last year bounce back
+  (worst vs best quintile of pressure allowed, same-team players, ppg residual after prior ppg,
+  team-season bootstrap)? Unconfirmed for WR (+0.75 ppg [-0.25, +1.88], about what the mechanics
+  predict), opposite signs for TE and RB, QB underpowered; all intervals include zero.
 - New `coverage_value_backtest` (repo-style, prior-season inputs only, out-of-sample): adding
   a player's man-minus-zone gap, alone or interacted with how man-heavy his schedule is, to his
   prior points per game does NOT improve next-season prediction for WR, TE or RB (effects

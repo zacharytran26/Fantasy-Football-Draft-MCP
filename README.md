@@ -146,6 +146,7 @@ hundredths, ordering correct.
 | `coverage_roles` | Which coverages feed which receiver roles, league-wide or for one team |
 | `alignment_report` | True X / Z / Slot / Y leaders vs man or zone (2023-2025 rookie classes; needs a local build) |
 | `pocket_report` | How dropbacks end by coverage, pressure and time to throw; team pressure rate allowed (context only) |
+| `pressure_rebound_backtest` | Do players on a team with bad pass protection last year bounce back? (unconfirmed) |
 | `coverage_split_backtest` | Does a player's man-vs-zone gap repeat year to year? (mostly no) |
 | `coverage_value_backtest` | Does coverage improve next-season prediction beyond prior production? (no, for WR/TE/RB) |
 | `value_picks` | Where the model disagrees with the draft market |

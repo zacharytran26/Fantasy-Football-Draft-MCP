@@ -166,6 +166,15 @@ year to year and did not improve next-season player prediction. Sacks carry no c
 `coverage_report`, `coverage_roles` and both backtests also accept `pocket` (`all`, `clean`,
 `pressured`) to separate coverage from pressure.
 
+### `pressure_rebound_backtest`
+Tests the rebound rule: players still on a team that ranked worst (default worst 20%) in pressure
+allowed last season, vs. players still on a best-20% team, on ppg residual after prior ppg, with
+team-season bootstrap CIs. An `oracle` row uses the pressure the team actually allowed that
+season (not knowable in August) to check the mechanism. 2022-2025: the mechanism shows up for WR
+(~-0.34 ppg per SD worse protection) and protection does revert toward average, so ~+0.7 ppg is what
+the mechanics predict for WRs and +0.75 is observed, but every interval for the usable rule includes
+zero and TE/RB point the other way. Unconfirmed, so it is not used in rankings.
+
 ### `coverage_roles`
 Target share by role against each coverage. X = a team's most-targeted WR, Z = second,
 Slot = third, Y = most-targeted TE, RB = any back -- target-rank stand-ins, not alignment.
