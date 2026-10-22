@@ -146,6 +146,7 @@ hundredths, ordering correct.
 | `coverage_roles` | Which coverages feed which receiver roles, league-wide or for one team |
 | `alignment_report` | True X / Z / Slot / Y leaders vs man or zone (2023-2025 rookie classes; needs a local build) |
 | `coverage_split_backtest` | Does a player's man-vs-zone gap repeat year to year? (mostly no) |
+| `coverage_value_backtest` | Does coverage improve next-season prediction beyond prior production? (no, for WR/TE/RB) |
 | `value_picks` | Where the model disagrees with the draft market |
 | `draft_value_history` | Backtest: preseason rank vs actual finish, by round and position |
 | `matchup_backtest` | Backtest: does schedule-adjusted matchup score beat talent alone at predicting finish? |
