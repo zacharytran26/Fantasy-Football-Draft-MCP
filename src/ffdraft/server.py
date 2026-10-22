@@ -18,7 +18,9 @@ except ImportError:  # mcp SDK 1.x
     from mcp.server.fastmcp import FastMCP as _Server
 
 from . import adp as adp_mod
+from . import alignment as align_mod
 from . import board as bd
+from . import coverage as cov_mod
 from . import features, model, sources
 from . import kickers as kk_mod
 from .config import (
@@ -478,8 +480,7 @@ def separation_report(position: str = "WR", player_name: str | None = None,
     difficulty into a combined ranking made it a worse predictor of actual finish
     than talent alone for WR, so it isn't blended into the sort here.
 
-    Man-versus-zone splits are not reproducible from open data — that needs
-    per-play coverage charting.
+    Man-versus-zone splits live in `coverage_report` (nflverse per-play coverage tags).
     """
     from . import separation as sep_mod
 
@@ -529,6 +530,161 @@ def separation_report(position: str = "WR", player_name: str | None = None,
                 "better, so it's shown for reference but not part of the sort.",
         "players": _rows(cur, cols, limit),
     }, indent=2, default=str)
+
+
+_COVERAGE_COLS = ["name", "position", "team", "overall_rank", "adp", "man_snaps", "zone_snaps",
+                  "man_tpps", "zone_tpps", "man_catch", "zone_catch", "man_ypt", "zone_ypt",
+                  "man_yps", "zone_yps", "man_epa_t", "zone_epa_t", "diff_yps", "diff_tpps"]
+
+_COVERAGE_WARNING = (
+    "A player's man-minus-zone gap barely repeats year to year (see coverage_split_backtest: "
+    "WR rank correlation ~0.0-0.25 on ~50 players), so treat an individual's split as context, "
+    "not a reason to move him up the board. The position- and role-level patterns in "
+    "coverage_roles are the stable part. Informational only -- not part of draft_score.")
+
+
+@mcp.tool()
+def coverage_report(position: str = "WR", coverage: str = "man", sort_by: str = "yps",
+                    min_snaps: int = 150, limit: int = 15, player_name: str | None = None,
+                    available_only: bool = False, window: int = 3) -> str:
+    """How WR / TE / RB production splits against man versus zone coverage.
+
+    Built from nflverse per-play coverage tags (Cover 0/1/2/3/4/6, 2-Man; ~half of
+    dropbacks are tagged) joined to play-by-play, pooled over the last `window`
+    seasons. Works for veterans -- it needs no tracking or alignment data.
+
+    Columns: `tpps` targets per pass snap on the field (blocking snaps count in the
+    denominator, so it understates true TPRR -- compare within a position), `catch` %,
+    `ypt` yards/target, `yps` yards per pass snap, `epa_t` EPA/target.
+
+    Pass `player_name` for one player's man/zone splits against his position baseline
+    (plus his true snap alignment profile if he is a 2023-2025 rookie-class player and
+    scripts/build_alignment.py has been run). Otherwise returns a leaderboard against
+    `coverage` ("man" or "zone") sorted by sort_by (yps, epa_t, ypt, tpps, catch);
+    `available_only` hides players already drafted in the current draft.
+
+    Informational only: individual man-vs-zone gaps are mostly noise year to year, so
+    this is not blended into draft_score. See coverage_split_backtest.
+    """
+    seasons = list(range(CURRENT_SEASON - window, CURRENT_SEASON))
+    try:
+        sp = cov_mod.player_splits(seasons)
+        base = cov_mod.position_baselines(seasons)
+    except Exception as exc:  # network / unpublished season
+        return json.dumps({"error": f"coverage data unavailable: {type(exc).__name__}: {exc}"})
+    b = _mark_drafted(_build_board(), _state())
+    sp = sp.merge(b[["player_id", "overall_rank", "adp", "drafted"]], on="player_id", how="left")
+
+    if player_name:
+        row = bd.match_player(player_name, b)
+        pid = row["player_id"] if row is not None else None
+        r = sp[sp["player_id"] == pid] if pid is not None else sp.iloc[0:0]
+        if r.empty:
+            return json.dumps({"error": f"no coverage split for '{player_name}' (needs WR/TE/RB with "
+                                        f"tagged snaps against both man and zone in {seasons})"})
+        r = r.iloc[0]
+        out = {"player": r["name"], "position": r["position"], "seasons": seasons,
+               "splits": _rows(pd.DataFrame([r]), _COVERAGE_COLS, 1)[0],
+               "position_baseline": base.get(r["position"]),
+               "warning": _COVERAGE_WARNING}
+        al = align_mod.profile(pid)
+        if al:
+            out["alignment"] = al
+        return json.dumps(out, indent=2, default=str)
+
+    pos = position.upper()
+    cov = coverage.lower()
+    key = f"{cov}_{sort_by}"
+    if cov not in ("man", "zone") or f"man_{sort_by}" not in sp.columns:
+        return json.dumps({"error": "coverage must be man|zone and sort_by one of yps, epa_t, ypt, tpps, catch"})
+    d = sp[(sp["position"] == pos) & (sp[f"{cov}_snaps"] >= min_snaps)]
+    if available_only:
+        d = d[d["drafted"] == False]  # noqa: E712 -- NaN (not on board) is excluded too
+    d = d.sort_values(key, ascending=False)
+    return json.dumps({"position": pos, "coverage": cov, "seasons": seasons, "ranked_by": key,
+                       "position_baseline": base.get(pos, {}).get(cov), "qualifying_players": int(len(d)),
+                       "warning": _COVERAGE_WARNING,
+                       "players": _rows(d, _COVERAGE_COLS, limit)}, indent=2, default=str)
+
+
+@mcp.tool()
+def coverage_roles(team: str | None = None, window: int = 3) -> str:
+    """Which receivers each coverage feeds, league-wide or for one team.
+
+    Targets are split by ROLE against each coverage: X = a team's most-targeted WR that
+    season, Z = second, Slot = third, Y = most-targeted TE, RB = any back. These are
+    target-rank stand-ins, not snap alignment (no open source has alignment for
+    veterans) -- the WR3 is not necessarily a slot receiver.
+
+    League pattern, stable across 2021-2025: man coverage (Cover 0/1) raises WR
+    shares and cuts RB share ~5-9 points; Cover 2 and Cover 6 push targets to RBs and
+    away from the WR1; TE share barely moves.
+
+    With `team`, also returns the coverage mix that team's defense runs and how that
+    offense's targets split by role against each coverage -- single-team splits are
+    small samples, so lean on the multi-season view.
+    """
+    seasons = list(range(CURRENT_SEASON - window, CURRENT_SEASON))
+    try:
+        out = {"seasons": seasons, "league": cov_mod.role_table(seasons)}
+        if team:
+            out["team"] = cov_mod.team_profile(team, seasons)
+    except Exception as exc:
+        return json.dumps({"error": f"coverage data unavailable: {type(exc).__name__}: {exc}"})
+    return json.dumps(out, indent=2, default=str)
+
+
+@mcp.tool()
+def alignment_report(role: str = "Slot", coverage: str = "MAN", sort_by: str = "yards_per_route",
+                     min_routes: int = 100, limit: int = 10, available_only: bool = False) -> str:
+    """True snap alignment leaders (X / Z / Slot / Y) for the 2023-2025 rookie classes.
+
+    From Big Data Bowl tracking, so it covers rookies only (~115 WR/TE) -- veterans have
+    no open alignment data. role: X (outside, on the line), Z (outside, off the line),
+    Slot, Y (TE). coverage: MAN, ZONE or ALL. sort_by: yards_per_route, epa_per_target,
+    tprr, catch, yards_per_target. Rates are per route run, so they don't depend on
+    who else is on the field.
+
+    Needs a one-time local build (scripts/build_alignment.py) from your own copy of the
+    Big Data Bowl files; the data is CC BY-NC and is not shipped with this repo. Without
+    it this tool says so and nothing else is affected.
+    """
+    if not align_mod.available():
+        return json.dumps({"error": "alignment data not built. Run: python scripts/build_alignment.py "
+                                    "<path to Big Data Bowl 2027 parquet files> (see docs/tools.md)."})
+    role, cov_ = role.capitalize() if role.lower() == "slot" else role.upper(), coverage.upper()
+    if role not in ("X", "Z", "Slot", "Y") or cov_ not in ("MAN", "ZONE", "ALL") or sort_by not in align_mod.SORTS:
+        return json.dumps({"error": "role X|Z|Slot|Y, coverage MAN|ZONE|ALL, sort_by "
+                                    + "|".join(align_mod.SORTS)})
+    rows = align_mod.leaders(role, cov_, sort_by, min_routes)
+    b = _mark_drafted(_build_board(), _state())[["player_id", "overall_rank", "adp", "drafted"]]
+    d = pd.DataFrame(rows).merge(b, on="player_id", how="left") if rows else pd.DataFrame()
+    if available_only and not d.empty:
+        d = d[d["drafted"] == False]  # noqa: E712
+    cols = ["name", "team", "draft_year", "routes", "targets", "tprr", "catch", "adot", "ypt", "yac", "yprr",
+            "epa_t", "overall_rank", "adp"]
+    return json.dumps({"role": role, "coverage": cov_, "ranked_by": sort_by, "min_routes": min_routes,
+                       "note": "Rookie classes 2023-2025 only. Samples are small (tens of targets); the gap "
+                               "between the top two or three and the rest is the reliable part, the order "
+                               "within a few is not.",
+                       "players": _rows(d, [c for c in cols if c in d.columns], limit) if not d.empty else []},
+                      indent=2, default=str)
+
+
+@mcp.tool()
+def coverage_split_backtest(position: str = "WR", min_snaps: int = 120, window: int = 4) -> str:
+    """Does a player's man-minus-zone gap repeat? Year-to-year rank correlation of each
+    metric's gap, among players with `min_snaps` against both coverages in both seasons.
+
+    Near zero means the split is luck and shouldn't move a draft board; this is why
+    coverage_report is informational only and not part of draft_score. Run it for
+    WR, TE and RB.
+    """
+    seasons = list(range(CURRENT_SEASON - window, CURRENT_SEASON))
+    try:
+        return json.dumps(cov_mod.split_persistence(position, seasons, min_snaps), indent=2)
+    except Exception as exc:
+        return json.dumps({"error": f"coverage data unavailable: {type(exc).__name__}: {exc}"})
 
 
 @mcp.tool()
@@ -1650,6 +1806,29 @@ def prewarm(verbose: bool = True) -> str:
     return json.dumps(out, indent=2, default=str)
 
 
+def _coverage_snapshot(r: pd.Series) -> dict | None:
+    """Compact man/zone line for player_report. Never raises -- coverage is an extra,
+    so a data hiccup must not break the report it decorates."""
+    try:
+        seasons = list(range(CURRENT_SEASON - 3, CURRENT_SEASON))
+        sp = cov_mod.player_splits(seasons)
+        x = sp[sp["player_id"] == r["player_id"]]
+        out: dict = {}
+        if not x.empty:
+            x = x.iloc[0]
+            keep = ["man_snaps", "zone_snaps", "man_tpps", "zone_tpps", "man_catch", "zone_catch",
+                    "man_ypt", "zone_ypt", "man_yps", "zone_yps", "man_epa_t", "zone_epa_t"]
+            out["man_vs_zone"] = _rows(pd.DataFrame([x]), keep, 1)[0]
+            out["position_baseline"] = cov_mod.position_baselines(seasons).get(x["position"])
+            out["caution"] = "individual man/zone gaps are mostly noise year to year -- see coverage_split_backtest"
+        al = align_mod.profile(r["player_id"])
+        if al:
+            out["alignment"] = al
+        return out or None
+    except Exception:
+        return None
+
+
 @mcp.tool()
 def player_report(player_name: str) -> str:
     """Full breakdown of one player: production, role, environment, injury, consistency.
@@ -1688,6 +1867,10 @@ def player_report(player_name: str) -> str:
               "m_separation", "m_td_luck", "m_coverage_trend", "vor"]
     out = _rows(pd.DataFrame([r]), [f for f in fields if f in r.index], 1)[0]
     out["summary"] = model.explain(r)
+    if r["position"] in cov_mod.SKILL:
+        cs = _coverage_snapshot(r)
+        if cs:
+            out["coverage"] = cs
     return json.dumps(out, indent=2)
 
 
@@ -1907,8 +2090,9 @@ def model_settings(consistency_weight: float | None = None, injury_weight: float
     (target_share), on the theory that 2025's shift to zone coverage and, later,
     back to base personnel (linebackers instead of nickel corners covering the
     slot/backfield) favors those archetypes. Unlike separation or td_luck, this
-    isn't backed by a per-player real signal this project can backtest -- open
-    data has no man/zone or personnel-package split (see separation.py) -- so
+    isn't backed by a per-player real signal this project can backtest -- the
+    open man/zone split (coverage.py) is player-level and mostly noise year to year,
+    and there is no personnel-package split -- so
     treat any nonzero value as an opinion you're choosing to weight in, not a
     validated adjustment, and re-check the underlying rates each season.
     """

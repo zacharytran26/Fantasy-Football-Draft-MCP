@@ -128,6 +128,42 @@ schedule difficulty at that position -- the season-long, team-level stand-in for
 WR/CB matchup chart), shown for reference only: a backtest (`matchup_backtest`) found
 blending it into the ranking made WR predictions worse than talent alone, not better.
 
+### `coverage_report`
+How a WR/TE/RB produces against **man** versus **zone** coverage, from nflverse per-play
+coverage tags (about half of dropbacks are tagged), pooled over the last `window` seasons
+(default 3). Works for veterans. Pass `player_name` for one player's splits against his
+position baseline, or `position` + `coverage` (`man`/`zone`) for a leaderboard sorted by
+`sort_by` (`yps` yards per pass snap, `epa_t`, `ypt`, `tpps`, `catch`). `min_snaps` keeps
+samples honest; `available_only` hides players already drafted. `tpps` is targets per pass
+snap on the field (blocking snaps count), so compare within a position.
+
+**Informational, not in `draft_score`.** A player's man-minus-zone gap barely repeats year to
+year -- run `coverage_split_backtest` to see it.
+
+### `coverage_roles`
+Target share by role against each coverage. X = a team's most-targeted WR, Z = second,
+Slot = third, Y = most-targeted TE, RB = any back -- target-rank stand-ins, not alignment.
+League pattern: man coverage raises WR shares and cuts RB share ~5-9 points, Cover 2 and 6
+push targets to backs, TE share barely moves. Pass `team` for its defense's coverage mix and
+its offense's role split (small samples; trust the multi-season view).
+
+### `alignment_report`
+True snap alignment leaders -- `role` X (outside, on the line), Z (outside, off the line),
+Slot, Y (TE) -- against `coverage` MAN/ZONE/ALL, per route run. **2023-2025 rookie classes
+only** (Big Data Bowl tracking). Needs a one-time local build:
+
+```bash
+python scripts/build_alignment.py /path/to/bdb2027/parquet
+```
+
+The Big Data Bowl data is CC BY-NC, so nothing per-player ships in the repo. Without the
+built file the tool says so and everything else runs normally. `player_report` and
+`coverage_report(player_name=...)` also surface a rookie's alignment profile once built.
+
+### `coverage_split_backtest`
+Year-to-year rank correlation of each metric's man-minus-zone gap, by position. Near zero
+means the split is luck. This is why `coverage_report` is not blended into the ranking.
+
 ### `value_picks`
 Where the model disagrees with the market. `direction`: `undervalued` or `overvalued`.
 Restricted to players the market actually ranks.

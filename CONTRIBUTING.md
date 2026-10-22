@@ -47,8 +47,10 @@ Open sources only — nflverse, Next Gen Stats, public consensus rankings. No pa
 data, no scraping around access controls, and no redistributing third-party datasets in
 the repo.
 
-Some things genuinely can't be built here. Man/zone coverage splits need per-play
-charting that only commercial providers do. That's a real limit, not an oversight.
+Some things genuinely can't be built here. True receiver alignment (X/Z/slot) for
+veterans needs tracking or charting that only commercial providers have; the only open
+alignment data covers the 2023-2025 rookie classes (see `alignment.py`). That's a real
+limit, not an oversight. (Man/zone splits, once thought out of reach, are in `coverage.py`.)
 
 ## Name matching
 

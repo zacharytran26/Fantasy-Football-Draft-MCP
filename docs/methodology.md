@@ -188,16 +188,38 @@ a few hundredths and the ordering matched.
 Qualification is strict — 250 estimated routes and 50 targets. These are rate stats, and
 a part-time receiver posts a flattering YPRR that says nothing about a real workload.
 
-**Man/zone splits are not reproducible** from open data. That needs per-play coverage
-classification, which only manual charting provides.
+**Man/zone splits** are recoverable, with caveats, from nflverse per-play coverage tags --
+see "Man-versus-zone coverage" below. They are not part of `sep_score`.
+
+## Man-versus-zone coverage
+
+`coverage.py` joins nflverse `pbp_participation` (`defense_coverage_type`, plus the eleven
+offensive players on the field) to play-by-play for the regular season's dropbacks. About
+half of dropbacks carry a tag; Cover 9 is folded into Cover 3; the tags are NGS-model output,
+not hand charting. Exposure is snaps on the field, not routes, so `tpps` understates TPRR --
+read it against the position baseline.
+
+Two things hold up, and one doesn't:
+
+- **Holds (league / role level, 2021-2025, every season):** man coverage (Cover 0/1) raises
+  WR target shares and cuts RB share by roughly 5-9 points; Cover 2 and Cover 6 shift targets
+  to backs and away from the WR1; TE share barely moves.
+- **Holds (rookie alignment, small samples):** from the slot, rookies are targeted far more
+  often against man than zone; the top slot and outside producers against man separate
+  clearly from the rest. Roles beyond the 2023-2025 rookie classes have no open alignment data.
+- **Does not hold (individual players):** a player's man-minus-zone gap barely repeats from one
+  season to the next (`coverage_split_backtest`; WR rank correlation roughly 0.0-0.25 on 45-58
+  players per pair, TE/RB noisier). So `coverage_report` is informational and nothing in
+  `draft_score` reads it -- the same bar `matchup_z` failed.
 
 ## Coverage-scheme trend (opt-in, off by default)
 
 `coverage_trend_weight` (via `model_settings`) is a supplied belief, the same category
 as `qb_boost`: it adjusts `draft_score`, but not from a real per-player signal this
 project can validate the way `separation` or `td_luck` can. Man-vs-zone and
-nickel-vs-base personnel rates aren't in any open dataset — see the man/zone caveat
-under Separation above — so there's no equivalent of `matchup_backtest` or
+nickel-vs-base personnel rates are not validated here: player-level man/zone gaps turned
+out to be mostly noise year to year (see "Man-versus-zone coverage" below) and
+personnel packages aren't in any open dataset — so there's no equivalent of `matchup_backtest` or
 `redzone_shift_backtest` to check it against real outcomes. It exists because external
 2025-season analysis (PFF, MatchQuarters, Sharp Football) found defenses shifted hard
 toward zone coverage (man coverage down to 22.6% of snaps, from 33%+ seven years prior)
@@ -302,7 +324,8 @@ reconciled against the current depth chart the way skill positions are.
 - **ADP is format- and league-specific.** Consensus is a decent default; your platform's
   export is better.
 - **No in-season usage updates.** This is a draft tool.
-- **Man/zone coverage splits** are unavailable. `coverage_trend_weight` proxies for
+- **Man/zone coverage splits** exist (`coverage_report`) but are informational: they
+  don't persist year to year, so nothing in `draft_score` uses them. `coverage_trend_weight` proxies for
   the trend qualitatively (TPRR/aDOT for WR/TE, target_share for RB) but defaults to
   0 and isn't backtested — see "Coverage-scheme trend" above.
 - **Kickers** get a standalone ranking (see "Kickers" above) but aren't in the VOR/

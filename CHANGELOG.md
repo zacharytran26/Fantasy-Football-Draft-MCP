@@ -8,6 +8,28 @@ All notable changes to this project. Format follows
 
 ### Added
 
+**Man-versus-zone coverage splits**
+- New `coverage.py`: joins nflverse `pbp_participation` coverage tags (Cover 0/1/2/3/4/6,
+  2-Man; about half of dropbacks are tagged) to play-by-play and the offensive players on
+  the field. Corrects an earlier claim in `separation.py`, the docs and `CONTRIBUTING.md`
+  that man/zone splits were not reproducible from open data.
+- New tools: `coverage_report` (per-player or leaderboard, WR/TE/RB, veterans included,
+  with an `available_only` filter), `coverage_roles` (league- or team-level target share by
+  role against each coverage), `alignment_report`, and `coverage_split_backtest`.
+  `player_report` gains a `coverage` section.
+- Exposure is snaps on the field, not routes run, so `tpps` understates TPRR; comparisons
+  are against the player's position baseline. Roles in `coverage_roles` are target-rank
+  stand-ins (X=WR1, Z=WR2, Slot=WR3, Y=TE1), not alignment.
+- **Informational only, not in `draft_score`.** `coverage_split_backtest` finds a player's
+  man-minus-zone gap barely repeats season to season (WR rank correlation roughly 0.0-0.25
+  on 45-58 players per season pair), so it fails the same bar `matchup_z` did. The stable
+  signal is role/position-level (e.g. man coverage cuts RB target share ~5-9 points).
+- New `alignment.py` + `scripts/build_alignment.py`: true snap alignment (X on the line,
+  Z off the line, Slot, Y) for the 2023-2025 rookie classes from Big Data Bowl 2027
+  tracking, joined to nflverse ids by birth date + surname. That data is CC BY-NC and the
+  competition rules govern it, so nothing per-player is committed: the script builds a
+  local file in `$FFDRAFT_DATA`, and every tool degrades gracefully without it.
+
 **Kicker draft ranking**
 - New `kickers.py`: a standalone kicker ranking, deliberately not run through
   `model.project()` (see its module docstring for why the O-line/pace/schedule/
