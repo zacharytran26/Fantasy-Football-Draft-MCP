@@ -6,7 +6,8 @@ against several seasons (see server.position_scarcity_entropy_backtest's docstri
 is what actually decides whether the feature earns its keep."""
 import pandas as pd
 
-from ffdraft import adp, board as bd, model
+from ffdraft import adp, model
+from ffdraft import board as bd
 from ffdraft.config import LeagueSettings
 from ffdraft.names import normalize as norm_name
 

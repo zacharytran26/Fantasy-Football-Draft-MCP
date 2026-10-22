@@ -431,7 +431,7 @@ class PositionMarkov:
                        else pd.DataFrame(0.0, index=list(POSITIONS), columns=list(POSITIONS)))
 
     @classmethod
-    def from_adp_order(cls, board: pd.DataFrame, smoothing: float = 1.0) -> "PositionMarkov":
+    def from_adp_order(cls, board: pd.DataFrame, smoothing: float = 1.0) -> PositionMarkov:
         """Prior transition counts from the board's own ADP order, standing in for
         real cross-room draft order -- we don't store other rooms' actual pick
         sequences, only where the market ends up ranking players.
@@ -440,7 +440,7 @@ class PositionMarkov:
                                   smoothing=smoothing)
 
     @classmethod
-    def from_sequences(cls, sequences: list[list[str]], smoothing: float = 1.0) -> "PositionMarkov":
+    def from_sequences(cls, sequences: list[list[str]], smoothing: float = 1.0) -> PositionMarkov:
         """Prior fit directly from one or more known position-of-pick sequences,
         each counted independently so a transition never gets fabricated across a
         season/draft boundary. Use this over from_adp_order when real order is

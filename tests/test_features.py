@@ -4,7 +4,11 @@ import pandas as pd
 import pytest
 
 from ffdraft import features, sources
-from ffdraft.features import _neutral_script_pass_rate, _redzone_identity_shift, _team_drive_efficiency
+from ffdraft.features import (
+    _neutral_script_pass_rate,
+    _redzone_identity_shift,
+    _team_drive_efficiency,
+)
 
 
 def _game(season, week, home, away, game_type="REG"):
