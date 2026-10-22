@@ -142,7 +142,7 @@ hundredths, ordering correct.
 | `rookie_report` | This year's rookie class, projected from draft capital |
 | `resolve_names` | Check how names resolve before trusting a paste sync |
 | `separation_report` | Separation, cushion, YPRR, TPRR, plus a schedule-adjusted matchup score |
-| `coverage_report` | Man vs zone splits for any WR/TE/RB (targets per snap, catch %, yards, EPA) against the position baseline |
+| `coverage_report` | (Context only, not in recommendations) Man vs zone splits for any WR/TE/RB (targets per snap, catch %, yards, EPA) against the position baseline |
 | `coverage_roles` | Which coverages feed which receiver roles, league-wide or for one team |
 | `alignment_report` | True X / Z / Slot / Y leaders vs man or zone (2023-2025 rookie classes; needs a local build) |
 | `coverage_split_backtest` | Does a player's man-vs-zone gap repeat year to year? (mostly no) |

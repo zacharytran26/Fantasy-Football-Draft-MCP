@@ -103,31 +103,6 @@ class TestPersistence:
         assert r["year_to_year_gap_persistence"]["tpps"][0]["spearman"] == pytest.approx(1.0)
 
 
-class TestDraftFlowSummary:
-    """The inline coverage read shown inside who_should_i_pick / best_available."""
-
-    def _ctx(self, man_yps, zone_yps):
-        row = {"position": "WR", "man_yps": man_yps, "zone_yps": zone_yps, "man_tpps": 25.0, "zone_tpps": 24.0,
-               "man_catch": 60.0, "zone_catch": 70.0, "man_snaps": 300.0, "zone_snaps": 400.0}
-        base = {"WR": {"man": {"yps": 1.5}, "zone": {"yps": 1.4}}}
-        return {"by_id": {"p1": row}, "base": base}
-
-    def test_no_verdict_is_attached_because_the_backtest_found_no_signal(self):
-        from ffdraft.server import _coverage_summary
-        assert "lean" not in _coverage_summary("p1", self._ctx(3.5, 1.0))
-
-    def test_reports_both_sides_against_the_position_average(self):
-        from ffdraft.server import _coverage_summary
-        s = _coverage_summary("p1", self._ctx(2.5, 2.0))
-        assert s["vs_man"]["yds_per_snap"] == 2.5 and s["vs_zone"]["snaps"] == 400
-        assert s["position_avg_yds_per_snap"] == {"man": 1.5, "zone": 1.4}
-
-    def test_missing_player_or_failed_load_is_none_not_an_error(self):
-        from ffdraft.server import _coverage_summary
-        assert _coverage_summary("zzz", self._ctx(2, 2)) is None
-        assert _coverage_summary("p1", None) is None
-
-
 class TestValueBacktest:
     def _frame(self, effect, n=240, seed=3):
         import numpy as np
