@@ -1,4 +1,5 @@
 """Man-vs-zone coverage splits: joining, exposure, rates, roles, persistence."""
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -175,3 +176,33 @@ class TestPocket:
         assert o["by_coverage"]["Cover 1"]["pressure_rate_pct"] == pytest.approx(66.7, abs=0.1)
         prot = cv.team_protection([2025]).iloc[0]
         assert prot["team"] == "AAA" and prot["pressure_rate"] == pytest.approx(60.0)
+
+
+class TestPressureRebound:
+    def _frame(self, rebound, n_teams=32, per_team=6, seed=5):
+        rng = np.random.default_rng(seed)
+        rows = []
+        for season in (2023, 2024):
+            for i in range(n_teams):
+                pct = (i + 1) / n_teams
+                for j in range(per_team):
+                    prior = rng.normal(12, 3)
+                    rows.append(dict(season=season, team=f"T{i}", position="WR", player_id=f"{season}-{i}-{j}", stayed=True,
+                                     prior_ppg=prior, prior_pct=pct, prior_pressure=20 + 10 * pct,
+                                     same_pressure=25 + rng.normal(0, 2), delta_z=rng.normal(),
+                                     ppg=prior + rebound * (pct - 0.5) * 2 + rng.normal(0, 1.5)))
+        h = pd.DataFrame(rows)
+        h["resid"] = h["ppg"] - np.polyval(np.polyfit(h["prior_ppg"], h["ppg"], 1), h["prior_ppg"])
+        return h
+
+    def test_a_planted_rebound_is_detected(self):
+        r = cv.summarize_pressure_rebound(self._frame(rebound=2.0), n_boot=300)["WR"]["stayed_on_team"]
+        assert r["rebound_ppg"] > 1.0 and r["excludes_zero"]
+
+    def test_no_rebound_is_not_reported_as_one(self):
+        r = cv.summarize_pressure_rebound(self._frame(rebound=0.0), n_boot=300)["WR"]["stayed_on_team"]
+        assert not r["excludes_zero"] and abs(r["rebound_ppg"]) < 0.5
+
+    def test_mean_reversion_stat_is_reported(self):
+        out = cv.summarize_pressure_rebound(self._frame(rebound=0.0), n_boot=50)
+        assert set(out["team_mean_reversion"]) == {"corr_prior_pressure_vs_change", "corr_prior_vs_same_pressure"}

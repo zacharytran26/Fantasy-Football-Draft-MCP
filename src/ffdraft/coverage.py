@@ -562,3 +562,98 @@ def team_protection(seasons=None) -> pd.DataFrame:
                      "epa_pressured": round(float(pr["epa"].sum()) / max(1, pr["n"].sum()), 3),
                      "avg_time_to_throw": round(float(g["ttt_sum"].sum()) / max(1, g["ttt_n"].sum()), 2)})
     return pd.DataFrame(rows).sort_values("pressure_rate").reset_index(drop=True)
+
+
+def _team_season_context(season: int) -> pd.DataFrame:
+    """Per team: pressure allowed (ex-sack) the PRIOR season, the same season (oracle only), and
+    each as a percentile across teams (1.0 = worst protection)."""
+    prev = team_protection([season - 1]).set_index("team")["pressure_rate_ex_sack"]
+    cur = team_protection([season]).set_index("team")["pressure_rate_ex_sack"]
+    out = pd.DataFrame({"prior_pressure": prev, "same_pressure": cur})
+    out["prior_pct"] = out["prior_pressure"].rank(pct=True)
+    out["delta_z"] = ((out["same_pressure"] - out["prior_pressure"])
+                      - (out["same_pressure"] - out["prior_pressure"]).mean()) / (out["same_pressure"] - out["prior_pressure"]).std(ddof=0)
+    return out.reset_index().rename(columns={"index": "team"})
+
+
+def pressure_rebound_frame(seasons, sc=None, min_games: int = 6) -> pd.DataFrame:
+    """One row per player-season with prior and current points per game, the team he finished each
+    season on, and that team's protection context. Residual = ppg minus what prior ppg predicts."""
+    from .adp import season_finish
+    from .config import Scoring
+    sc = sc or Scoring()
+    frames = []
+    for season in seasons:
+        ctx = _team_season_context(season)
+        w_t, w_p = sources.weekly_stats([season]), sources.weekly_stats([season - 1])
+
+        def last_team(w):
+            t = w.sort_values("week").groupby("player_id")["recent_team"].last().replace(sources._TEAM_CODE_FIX)
+            return t.rename("team").reset_index()
+
+        fin = season_finish(season, sc)
+        fin = fin[fin["games"] >= min_games][["player_id", "position", "ppg"]]
+        prev = season_finish(season - 1, sc)
+        prev = prev[prev["games"] >= min_games][["player_id", "ppg"]].rename(columns={"ppg": "prior_ppg"})
+        m = (fin.merge(prev, on="player_id").merge(last_team(w_t), on="player_id")
+             .merge(last_team(w_p).rename(columns={"team": "prior_team"}), on="player_id")
+             .merge(ctx, on="team", how="left"))
+        m["stayed"] = m["team"] == m["prior_team"]
+        m["season"] = season
+        frames.append(m)
+    h = pd.concat(frames, ignore_index=True).dropna(subset=["prior_pct"])
+    h["resid"] = np.nan
+    for pos, g in h.groupby("position"):
+        b = _ols(g[["prior_ppg"]].to_numpy(), g["ppg"].to_numpy())
+        h.loc[g.index, "resid"] = g["ppg"] - _predict(b, g[["prior_ppg"]].to_numpy())
+    return h
+
+
+def summarize_pressure_rebound(h: pd.DataFrame, tail: float = 0.2, n_boot: int = 2000, seed: int = 0) -> dict:
+    """Does a team's bad protection last year predict a rebound in its players' points per game?
+
+    The usable rule (known in August): players still on a team that ranked in the worst `tail`
+    for pressure allowed last season, vs. players still on a team in the best `tail`. The
+    measure is the mean residual of points per game after prior ppg (so ordinary regression to the
+    mean for the players themselves is removed). Bootstrapped over team-seasons, not players,
+    because teammates share one offense. The oracle row uses the pressure the team actually allowed
+    that season -- not knowable in August -- to check whether the mechanism exists at all."""
+    rng = np.random.default_rng(seed)
+    out = {}
+
+    def boot(g, stat):
+        clusters = [d for _, d in g.groupby(["team", "season"])]
+        vals = [stat(pd.concat([clusters[i] for i in rng.integers(0, len(clusters), len(clusters))])) for _ in range(n_boot)]
+        return [round(float(x), 2) for x in np.nanpercentile(vals, [2.5, 97.5])]
+
+    def gap(d):
+        bad, good = d[d["prior_pct"] >= 1 - tail], d[d["prior_pct"] <= tail]
+        return bad["resid"].mean() - good["resid"].mean() if len(bad) and len(good) else np.nan
+
+    def oracle(d):
+        return float(np.polyfit(d["delta_z"], d["resid"], 1)[0]) if d["delta_z"].std() > 0 else np.nan
+
+    for pos, g in h.groupby("position"):
+        row = {}
+        for label, d in (("any_team", g), ("stayed_on_team", g[g["stayed"]])):
+            bad, good = d[d["prior_pct"] >= 1 - tail], d[d["prior_pct"] <= tail]
+            if len(bad) < 5 or len(good) < 5:
+                continue
+            est = float(gap(d))
+            lo, hi = boot(d, gap)
+            row[label] = {"n_bad_protection": int(len(bad)), "n_good_protection": int(len(good)),
+                          "mean_resid_bad": round(float(bad["resid"].mean()), 2),
+                          "mean_resid_good": round(float(good["resid"].mean()), 2),
+                          "rebound_ppg": round(est, 2), "ci95": [lo, hi], "excludes_zero": bool(lo > 0 or hi < 0)}
+        d = g[g["stayed"]]
+        if len(d) > 20:
+            lo, hi = boot(d, oracle)
+            row["oracle_same_season_pressure_change"] = {
+                "ppg_per_sd_worse_protection": round(oracle(d), 2), "ci95": [lo, hi],
+                "note": "uses the pressure the team actually allowed that season; not knowable in August"}
+        out[pos] = row
+    teams = h.drop_duplicates(["team", "season"])
+    out["team_mean_reversion"] = {
+        "corr_prior_pressure_vs_change": round(float(teams["prior_pressure"].corr(teams["same_pressure"] - teams["prior_pressure"])), 2),
+        "corr_prior_vs_same_pressure": round(float(teams["prior_pressure"].corr(teams["same_pressure"])), 2)}
+    return out
