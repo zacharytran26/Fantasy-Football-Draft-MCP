@@ -216,6 +216,20 @@ Two things hold up, and one doesn't:
   man-exposure, to his prior points per game. WR lean +0.17 ppg/SD [-0.14, +0.47], TE -0.05
   [-0.29, +0.18], RB -0.06 [-1.02, +0.64]; out-of-sample Spearman did not improve for any
   position (WR 0.720 -> 0.717, TE 0.721 -> 0.712, RB 0.721 -> 0.714). Coverage is context.
+- **Pocket state is the bigger effect, and coverage survives it.** Over 2023-2025 a pressured dropback
+  averages -0.44 EPA vs +0.24 clean; good catches fall from 57% to 28%, ~22% of pressured dropbacks are
+  sacks, scrambles nearly double, and throws held past ~3.2s are the least efficient. Coverage shapes the
+  pocket (Cover 0 pressures the QB on ~40% of dropbacks vs 27-29% for zone looks), but the role pattern
+  holds with the pocket held clean (RB share ~23% in Cover 2 vs ~12% in Cover 1), and pressure adds a
+  further 3-5 points of RB share in every coverage as the QB checks down. Neither a clean-pocket
+  man/zone gap nor a team's prior-season pressure rate (alone or interacted with the gap) improves
+  next-season prediction: WR pressure +0.03 [-0.29, +0.33] ppg/SD, TE -0.19, RB +0.20, all straddling
+  zero, and extra terms made out-of-sample ranking slightly worse. Team pressure rate is also only
+  weakly repeatable (year-to-year r 0.47, 0.30, 0.34, -0.04). Pass-block rank stays in the player
+  model as before.
+- **Data caveat (sacks):** sack plays carry no coverage tag before 2023 (0% of pressured dropbacks vs
+  21-23% after), so pocket outcome tables pooled across 2021-2025 understate what pressure costs. Use
+  2023+ windows; the team pressure feature uses the ex-sack rate so it is comparable across seasons.
 - **Data caveat:** the coverage tags are not consistent across seasons (league man share
   30%, 29%, 44%, 50%, 31% for 2021-2025), so use within-season ranks and pooled windows, never a
   raw man rate as a trend.

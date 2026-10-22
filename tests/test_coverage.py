@@ -123,3 +123,55 @@ class TestValueBacktest:
 
     def test_too_few_rows_say_so_instead_of_fitting(self):
         assert "error" in cv.summarize_value_backtest(self._frame(1.0, n=12), n_boot=10)
+
+
+class TestPocket:
+    def _raw_with_pressure(self):
+        pbp = _pbp([
+            dict(play_id=1, receiver_player_id="A", complete_pass=1, yards_gained=12.0, epa=0.6),
+            dict(play_id=2, receiver_player_id="A", complete_pass=1, yards_gained=2.0, epa=-0.1),
+            dict(play_id=3, sack=1, pass_attempt=0, epa=-1.2, yards_gained=-7.0),
+            dict(play_id=4, receiver_player_id="B", interception=1, epa=-4.0),
+            dict(play_id=5, receiver_player_id="B", epa=-0.5),
+        ])
+        pbp["qb_scramble"] = 0
+        part = _part([
+            dict(play_id=1, defense_coverage_type="COVER_1", was_pressure=False, time_to_throw=2.5, number_of_pass_rushers=4),
+            dict(play_id=2, defense_coverage_type="COVER_1", was_pressure=True, time_to_throw=2.0, number_of_pass_rushers=5),
+            dict(play_id=3, defense_coverage_type="COVER_1", was_pressure=True, time_to_throw=3.5, number_of_pass_rushers=5),
+            dict(play_id=4, defense_coverage_type="COVER_3", was_pressure=True, time_to_throw=2.4, number_of_pass_rushers=4),
+            dict(play_id=5, defense_coverage_type="COVER_3", was_pressure=False, time_to_throw=2.9, number_of_pass_rushers=4),
+        ])
+        return cv.build_raw(pbp, part)
+
+    def test_pressure_splits_a_players_snaps_and_targets(self):
+        p = self._raw_with_pressure()["player"].set_index(["player_id", "cov", "pocket"])
+        assert p.loc[("A", "Cover 1", "clean"), "targets"] == 1 and p.loc[("A", "Cover 1", "pressured"), "targets"] == 1
+        assert p.loc[("A", "Cover 1", "pressured"), "snaps"] == 2     # the pressured catch and the sack
+
+    def test_outcomes_partition_every_tagged_dropback(self):
+        db = self._raw_with_pressure()["dropbacks"]
+        assert db["n"].sum() == 5
+        by = db.groupby("outcome")["n"].sum().to_dict()
+        assert by == {"good_catch": 1, "marginal_catch": 1, "sack": 1, "interception": 1, "incomplete": 1}
+
+    def test_time_to_throw_buckets_and_missing_columns(self):
+        db = self._raw_with_pressure()["dropbacks"]
+        assert set(db["ttt"]) == {"<2.2s", "2.2-2.7s", "2.7-3.2s", ">3.2s"}
+        assert "pocket" in _raw()["player"].columns          # synthetic data with no pressure columns -> all clean
+        assert set(_raw()["player"]["pocket"]) == {"clean"}
+
+    def test_unknown_pocket_is_rejected(self):
+        import pytest
+        with pytest.raises(ValueError):
+            cv._pocket(_raw()["player"], "sideways")
+        assert len(cv._pocket(self._raw_with_pressure()["player"], "pressured")) > 0
+
+    def test_pocket_outcomes_and_protection_from_the_aggregate(self, monkeypatch):
+        raw = self._raw_with_pressure()
+        monkeypatch.setattr(cv, "_raw", lambda seasons=None: raw)
+        o = cv.pocket_outcomes([2025])
+        assert o["by_pocket"]["pressured"]["sack"] == pytest.approx(100 / 3, abs=0.1)   # 1 of 3 pressured dropbacks
+        assert o["by_coverage"]["Cover 1"]["pressure_rate_pct"] == pytest.approx(66.7, abs=0.1)
+        prot = cv.team_protection([2025]).iloc[0]
+        assert prot["team"] == "AAA" and prot["pressure_rate"] == pytest.approx(60.0)

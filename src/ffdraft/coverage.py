@@ -45,9 +45,13 @@ ROLES = ["X", "Z", "Slot", "Y", "RB"]
 # Seasons used when a caller doesn't say: the last three of the lookback window.
 RECENT_SEASONS = 3
 
+TTT_BINS = [0, 2.2, 2.7, 3.2, 10]
+TTT_LABELS = ["<2.2s", "2.2-2.7s", "2.7-3.2s", ">3.2s"]
+OUTCOMES = ["sack", "scramble", "interception", "incomplete", "marginal_catch", "good_catch"]
+
 _PBP_COLS = [
     "season", "season_type", "game_id", "play_id", "posteam", "defteam", "qb_dropback",
-    "pass_attempt", "sack", "complete_pass", "yards_gained", "yards_after_catch",
+    "pass_attempt", "sack", "qb_scramble", "complete_pass", "yards_gained", "yards_after_catch",
     "air_yards", "epa", "interception", "pass_touchdown", "receiver_player_id",
 ]
 
@@ -79,14 +83,21 @@ def build_raw(pbp: pd.DataFrame, part: pd.DataFrame) -> dict[str, pd.DataFrame]:
     part = part.rename(columns={"nflverse_game_id": "game_id"}).copy()
     part["play_id"] = part["play_id"].astype(int)
     part["cov"] = part["defense_coverage_type"].map(COV_LABEL)
+    for c in ("was_pressure", "time_to_throw", "number_of_pass_rushers"):
+        if c not in part.columns:
+            part[c] = np.nan
     part = part.dropna(subset=["cov", "offense_players"])
-    plays = pbp.merge(part[["game_id", "play_id", "cov", "offense_players"]],
+    plays = pbp.merge(part[["game_id", "play_id", "cov", "offense_players", "was_pressure",
+                            "time_to_throw", "number_of_pass_rushers"]],
                       on=["game_id", "play_id"], how="inner")
+    # The pocket decides how a route can pay off: a pressured QB throws early, checks down, takes
+    # a sack or throws it away. Splitting by it keeps coverage from being credited with pocket effects.
+    plays["pocket"] = np.where(plays["was_pressure"].astype(float) == 1, "pressured", "clean")
 
-    ex = plays[["season", "cov", "offense_players"]].copy()
+    ex = plays[["season", "cov", "pocket", "offense_players"]].copy()
     ex["player_id"] = ex.pop("offense_players").str.split(";")
     snaps = (ex.explode("player_id").dropna(subset=["player_id"])
-             .groupby(["season", "player_id", "cov"]).size().rename("snaps").reset_index())
+             .groupby(["season", "player_id", "cov", "pocket"]).size().rename("snaps").reset_index())
 
     t = plays[(plays["pass_attempt"] == 1) & (plays["sack"] != 1)
               & plays["receiver_player_id"].notna()].copy()
@@ -98,18 +109,36 @@ def build_raw(pbp: pd.DataFrame, part: pd.DataFrame) -> dict[str, pd.DataFrame]:
     t["int"] = (t["interception"] == 1).astype(int)
     t["td"] = (t["pass_touchdown"] == 1).astype(int)
     tg = (t.rename(columns={"receiver_player_id": "player_id"})
-          .groupby(["season", "player_id", "cov"])
+          .groupby(["season", "player_id", "cov", "pocket"])
           .agg(targets=("comp", "size"), rec=("comp", "sum"), rec_yds=("yds", "sum"),
                yac=("yac", "sum"), air_yards=("air", "sum"), epa=("epa", "sum"),
                ints=("int", "sum"), tds=("td", "sum")).reset_index())
-    player = snaps.merge(tg, on=["season", "player_id", "cov"], how="outer")
-    for c in player.columns.difference(["season", "player_id", "cov"]):
+    player = snaps.merge(tg, on=["season", "player_id", "cov", "pocket"], how="outer")
+    for c in player.columns.difference(["season", "player_id", "cov", "pocket"]):
         player[c] = player[c].fillna(0)
 
     team_def = plays.groupby(["season", "defteam", "cov"]).size().rename("plays").reset_index()
     targets = t.rename(columns={"receiver_player_id": "player_id"})[
-        ["season", "posteam", "defteam", "player_id", "cov", "comp", "yds", "yac", "air", "epa", "int"]]
-    return {"player": player, "team_def": team_def, "targets": targets}
+        ["season", "posteam", "defteam", "player_id", "cov", "pocket", "comp", "yds", "yac", "air", "epa", "int"]]
+
+    # Every tagged dropback by how it ended, so pocket effects can be read straight off the table.
+    pl = plays.copy()
+    if "qb_scramble" not in pl.columns:
+        pl["qb_scramble"] = 0
+    pl["epa_"] = pl["epa"].fillna(0.0)
+    yd = pl["yards_gained"].fillna(0.0)
+    pl["outcome"] = np.select(
+        [pl["sack"] == 1, pl["qb_scramble"] == 1, pl["interception"] == 1,
+         (pl["pass_attempt"] == 1) & (pl["complete_pass"] == 1) & (yd <= 3),
+         (pl["pass_attempt"] == 1) & (pl["complete_pass"] == 1), pl["pass_attempt"] == 1],
+        ["sack", "scramble", "interception", "marginal_catch", "good_catch", "incomplete"], default="other")
+    pl["ttt"] = pd.cut(pl["time_to_throw"].astype(float), TTT_BINS, labels=TTT_LABELS).astype(object).fillna("unknown")
+    pl["rushers"] = pl["number_of_pass_rushers"].astype(float)
+    dropbacks = (pl.groupby(["season", "posteam", "defteam", "cov", "pocket", "ttt", "outcome"])
+                 .agg(n=("epa_", "size"), epa=("epa_", "sum"), ttt_sum=("time_to_throw", "sum"),
+                      ttt_n=("time_to_throw", "count"), rushers_sum=("rushers", "sum"),
+                      rushers_n=("rushers", "count")).reset_index())
+    return {"player": player, "team_def": team_def, "targets": targets, "dropbacks": dropbacks}
 
 
 def _raw(seasons=None) -> dict[str, pd.DataFrame]:
@@ -117,7 +146,7 @@ def _raw(seasons=None) -> dict[str, pd.DataFrame]:
     season themselves, so a 3-season view and a backtest reuse one download and one cache."""
     seasons = list(SEASONS)
     key = f"{min(seasons)}_{max(seasons)}"
-    names = ("player", "team_def", "targets")
+    names = ("player", "team_def", "targets", "dropbacks")
     built: dict = {}
 
     def make(name):
@@ -127,11 +156,12 @@ def _raw(seasons=None) -> dict[str, pd.DataFrame]:
                                                     seasons, _PBP_COLS),
                                        _read_strict(PART_URL, seasons,
                                                     ["nflverse_game_id", "play_id", "offense_players",
-                                                     "defense_coverage_type"])))
+                                                     "defense_coverage_type", "was_pressure", "time_to_throw",
+                                                     "number_of_pass_rushers"])))
             return built[name]
         return build
 
-    return {n: _cached(f"coverage_{n}_{key}", make(n), max_age_days=30.0) for n in names}
+    return {n: _cached(f"coverage2_{n}_{key}", make(n), max_age_days=30.0) for n in names}
 
 
 def _stats(g: pd.DataFrame) -> pd.DataFrame:
@@ -154,16 +184,25 @@ def _stats(g: pd.DataFrame) -> pd.DataFrame:
 _SUMS = ["snaps", "targets", "rec", "rec_yds", "yac", "air_yards", "epa", "ints", "tds"]
 
 
+POCKETS = ("all", "clean", "pressured")
+
+
+def _pocket(p: pd.DataFrame, pocket: str) -> pd.DataFrame:
+    if pocket not in POCKETS:
+        raise ValueError(f"pocket must be one of {POCKETS}")
+    return p if pocket == "all" else p[p["pocket"] == pocket]
+
+
 def _positions() -> pd.DataFrame:
     p = sources.players()[["gsis_id", "display_name", "position", "latest_team"]]
     return p.rename(columns={"gsis_id": "player_id", "display_name": "name", "latest_team": "team"})
 
 
-def player_splits(seasons=None, min_snaps: int = 0) -> pd.DataFrame:
+def player_splits(seasons=None, min_snaps: int = 0, pocket: str = "all") -> pd.DataFrame:
     """One row per WR/TE/RB: stats against man (`man_*`) and zone (`zone_*`), plus the
     man-minus-zone differences. Counts are pooled across `seasons` before rates are taken."""
     seasons = _default_seasons(seasons)
-    p = _raw(seasons)["player"]
+    p = _pocket(_raw(seasons)["player"], pocket)
     p = p[p["season"].isin(seasons)].copy()
     p["mz"] = np.where(p["cov"].isin(MAN), "man", "zone")
     g = p.groupby(["player_id", "mz"])[_SUMS].sum()
@@ -179,11 +218,11 @@ def player_splits(seasons=None, min_snaps: int = 0) -> pd.DataFrame:
     return st.reset_index(drop=True)
 
 
-def position_baselines(seasons=None) -> dict:
+def position_baselines(seasons=None, pocket: str = "all") -> dict:
     """Pooled man/zone rates per position (counts summed, then rates), so a player
     reads against his own position rather than against the whole league."""
     seasons = _default_seasons(seasons)
-    p = _raw(seasons)["player"]
+    p = _pocket(_raw(seasons)["player"], pocket)
     p = p[p["season"].isin(seasons)].copy()
     pos = _positions().set_index("player_id")["position"].replace({"FB": "RB"})
     p["position"] = p["player_id"].map(pos)
@@ -211,12 +250,13 @@ def assign_roles(targets: pd.DataFrame) -> pd.DataFrame:
     return t.merge(cnt[["season", "posteam", "player_id", "role"]], on=["season", "posteam", "player_id"], how="left")
 
 
-def role_table(seasons=None) -> dict:
+def role_table(seasons=None, pocket: str = "all") -> dict:
     """League-wide share of targets by role against each coverage, with efficiency."""
     seasons = _default_seasons(seasons)
     t = _raw(seasons)["targets"]
-    t = assign_roles(t[t["season"].isin(seasons)])
-    out = {"n_targets": int(len(t)), "ALL": {}, "coverages": {}}
+    # roles are ranked on ALL of a team's targets, then the pocket filter is applied
+    t = _pocket(assign_roles(t[t["season"].isin(seasons)]), pocket)
+    out = {"n_targets": int(len(t)), "pocket": pocket, "ALL": {}, "coverages": {}}
     def block(d):
         n = max(1, len(d))
         res = {"n": int(len(d))}
@@ -258,12 +298,12 @@ def team_profile(team: str, seasons=None) -> dict:
             "offense_target_share_by_coverage": by}
 
 
-def split_persistence(position: str = "WR", seasons=None, min_snaps: int = 120) -> dict:
+def split_persistence(position: str = "WR", seasons=None, min_snaps: int = 120, pocket: str = "all") -> dict:
     """Does a player's man-minus-zone gap repeat? Spearman correlation of each
     metric's gap in one season against the next, among players with `min_snaps`
     against both coverages in both seasons. A gap that doesn't repeat is luck."""
     seasons = _default_seasons(seasons)
-    p = _raw(seasons)["player"]
+    p = _pocket(_raw(seasons)["player"], pocket)
     pos = _positions().set_index("player_id")["position"].replace({"FB": "RB"})
     p = p.assign(position=p["player_id"].map(pos))
     p = p[(p["position"] == position.upper()) & p["season"].isin(seasons)].copy()
@@ -285,7 +325,7 @@ def split_persistence(position: str = "WR", seasons=None, min_snaps: int = 120) 
                     pairs.append({"from": int(a), "to": int(b), "n": int(len(d)),
                                   "spearman": round(rho, 2) if np.isfinite(rho) else None})
         res[metric] = pairs
-    return {"position": position.upper(), "min_snaps_each_coverage": min_snaps, "year_to_year_gap_persistence": res}
+    return {"position": position.upper(), "pocket": pocket, "min_snaps_each_coverage": min_snaps, "year_to_year_gap_persistence": res}
 
 
 # ----------------------------------------------------------------------------- backtests
@@ -322,7 +362,7 @@ def schedule_man_exposure(season: int, prior_window: int = 2) -> pd.DataFrame:
 
 
 def coverage_value_backtest(seasons, position: str = "WR", sc=None, prior_window: int = 3,
-                            min_snaps: int = 100, min_games: int = 6) -> pd.DataFrame:
+                            min_snaps: int = 100, min_games: int = 6, pocket: str = "all") -> pd.DataFrame:
     """Would knowing a player's man/zone profile in August have helped predict his
     next-season fantasy output beyond what his own prior production already says?
 
@@ -332,7 +372,11 @@ def coverage_value_backtest(seasons, position: str = "WR", sc=None, prior_window
     per snap, and their gap `lean`); `sched_man_z` is how man-heavy the player's team
     schedule is, from opponents' prior-season coverage. The target is points per game
     in `season` for players with at least `min_games` games (coverage should not be
-    credited or blamed for injuries)."""
+    credited or blamed for injuries).
+
+    `pocket` restricts the coverage features to clean-pocket or pressured dropbacks, so the
+    man/zone gap is not just a pressure gap. `pressure_z` is how often the player's team
+    gave up pressure the PRIOR season (z across teams): the QB + protection context."""
     from .adp import season_finish
     from .config import Scoring
     sc = sc or Scoring()
@@ -342,7 +386,7 @@ def coverage_value_backtest(seasons, position: str = "WR", sc=None, prior_window
         prior = [y for y in range(season - prior_window, season) if y in SEASONS]
         if not prior:
             continue
-        sp = player_splits(prior)
+        sp = player_splits(prior, pocket=pocket)
         sp = sp[(sp["position"] == position) & (sp["man_snaps"] >= min_snaps) & (sp["zone_snaps"] >= min_snaps)]
         sp = sp[["player_id", "man_yps", "zone_yps", "man_tpps", "zone_tpps"]].copy()
         sp["lean"] = sp["man_yps"] - sp["zone_yps"]
@@ -355,9 +399,14 @@ def coverage_value_backtest(seasons, position: str = "WR", sc=None, prior_window
         team_of = (w[w["position"] == position].sort_values("week").groupby("player_id")["recent_team"]
                    .last().rename("team").reset_index())
         team_of["team"] = team_of["team"].replace(sources._TEAM_CODE_FIX)
+        prot = team_protection([season - 1]) if (season - 1) in SEASONS else pd.DataFrame(columns=["team", "pressure_rate_ex_sack"])
+        pr_ = prot["pressure_rate_ex_sack"]
+        prot = prot.assign(pressure_z=(pr_ - pr_.mean()) / (pr_.std(ddof=0) or 1.0))[["team", "pressure_z"]]
         m = (fin.merge(pf, on="player_id").merge(sp, on="player_id").merge(team_of, on="player_id", how="left")
-             .merge(schedule_man_exposure(season)[["team", "sched_man_z"]], on="team", how="left"))
+             .merge(schedule_man_exposure(season)[["team", "sched_man_z"]], on="team", how="left")
+             .merge(prot, on="team", how="left"))
         m["sched_man_z"] = m["sched_man_z"].fillna(0.0)
+        m["pressure_z"] = m["pressure_z"].fillna(0.0)
         m["season"] = season
         frames.append(m)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -376,62 +425,140 @@ def _spearman(a, b) -> float:
 
 
 def summarize_value_backtest(h: pd.DataFrame, top_n: int = 24, n_boot: int = 1000, seed: int = 0) -> dict:
-    """Does coverage add anything to prior production? Two views, both on out-of-sample data.
+    """Does coverage (or protection) add anything to prior production? Two views, both out of sample.
 
-    1. Coefficients: ppg ~ prior_ppg + lean_z + sched_z + lean_z*sched_z, with a bootstrap
-       over *players* (a player appears in up to three seasons, so rows aren't independent).
-       Effects are in fantasy points per game per 1 SD of the feature.
-    2. Out-of-sample ranking: for each season, fit on the OTHER seasons and predict it.
-       Compare Spearman and top-N precision for prior_ppg alone vs. adding coverage.
+    1. Coefficients: ppg ~ prior_ppg + lean_z + sched_man_z + lean_z*sched_man_z
+       [+ pressure_z + pressure_z*lean_z when the frame has pressure_z], with a bootstrap over
+       *players* (a player appears in up to three seasons, so rows aren't independent). Effects are
+       fantasy points per game per 1 SD of the feature.
+    2. Out-of-sample ranking: for each season, fit on the OTHER seasons and predict it. Compare
+       Spearman and top-N precision for prior_ppg alone against adding each block of features.
     """
     h = h.dropna(subset=["ppg", "prior_ppg", "lean"]).copy()
     if len(h) < 30 or h["season"].nunique() < 2:
         return {"n_player_seasons": int(len(h)), "error": "not enough player-seasons"}
     h["lean_z"] = (h["lean"] - h["lean"].mean()) / h["lean"].std(ddof=0)
     h["inter"] = h["lean_z"] * h["sched_man_z"]
-    cols = {"M0 prior_ppg": ["prior_ppg"], "M1 +lean": ["prior_ppg", "lean_z"],
+    has_p = "pressure_z" in h.columns
+    base = "M0 prior_ppg"
+    cols = {base: ["prior_ppg"], "M1 +lean": ["prior_ppg", "lean_z"],
             "M2 +lean +schedule x lean": ["prior_ppg", "lean_z", "sched_man_z", "inter"]}
+    full = ["prior_ppg", "lean_z", "sched_man_z", "inter"]
+    if has_p:
+        h["p_inter"] = h["pressure_z"] * h["lean_z"]
+        cols["M3 +team pressure"] = ["prior_ppg", "pressure_z"]
+        full = full + ["pressure_z", "p_inter"]
+        cols["M4 everything"] = full
 
     def fit(df):
-        return _ols(df[cols["M2 +lean +schedule x lean"]].to_numpy(), df["ppg"].to_numpy())
+        return _ols(df[full].to_numpy(), df["ppg"].to_numpy())
 
     beta = fit(h)
     rng = np.random.default_rng(seed)
     pids = h["player_id"].unique()
     groups = {k: g for k, g in h.groupby("player_id")}
-    boots = []
-    for _ in range(n_boot):
-        samp = pd.concat([groups[k] for k in rng.choice(pids, len(pids))])
-        boots.append(fit(samp))
-    boots = np.array(boots)
+    boots = np.array([fit(pd.concat([groups[k] for k in rng.choice(pids, len(pids))])) for _ in range(n_boot)])
 
-    def coef(i):
+    def coef(name):
+        i = full.index(name) + 1
         lo, hi = np.percentile(boots[:, i], [2.5, 97.5])
         return {"ppg_per_sd": round(float(beta[i]), 3), "ci95": [round(float(lo), 3), round(float(hi), 3)],
                 "excludes_zero": bool(lo > 0 or hi < 0)}
 
-    oos = {k: [] for k in cols}
     prec = {k: [] for k in cols}
     pred_all = {k: pd.Series(index=h.index, dtype=float) for k in cols}
-    for s in sorted(h["season"].unique()):
-        tr, te = h[h["season"] != s], h[h["season"] == s]
+    for s_ in sorted(h["season"].unique()):
+        tr, te = h[h["season"] != s_], h[h["season"] == s_]
         for k, c in cols.items():
-            b = _ols(tr[c].to_numpy(), tr["ppg"].to_numpy())
-            pred_all[k].loc[te.index] = _predict(b, te[c].to_numpy())
+            pred_all[k].loc[te.index] = _predict(_ols(tr[c].to_numpy(), tr["ppg"].to_numpy()), te[c].to_numpy())
         actual_top = te["ppg"].rank(ascending=False, method="min") <= top_n
         for k in cols:
             top = pred_all[k].loc[te.index].sort_values(ascending=False).head(top_n).index
             prec[k].append(float(actual_top.loc[top].mean()))
-    for k in cols:
-        oos[k] = _spearman(pred_all[k], h["ppg"])
-    base = "M0 prior_ppg"
-    return {
+    oos = {k: _spearman(pred_all[k], h["ppg"]) for k in cols}
+    out = {
         "n_player_seasons": int(len(h)), "n_players": int(len(pids)), "seasons": sorted(int(x) for x in h["season"].unique()),
         "top_n": top_n,
-        "effect_of_lean": coef(2), "effect_of_schedule_x_lean": coef(4),
+        "effect_of_lean": coef("lean_z"), "effect_of_schedule_x_lean": coef("inter"),
         "oos_spearman": {k: round(v, 4) for k, v in oos.items()},
         "oos_top_n_precision": {k: round(float(np.mean(v)), 4) for k, v in prec.items()},
         "improvement_spearman_M1": round(oos["M1 +lean"] - oos[base], 4),
         "improvement_spearman_M2": round(oos["M2 +lean +schedule x lean"] - oos[base], 4),
         "improvement_precision_M2": round(float(np.mean(prec["M2 +lean +schedule x lean"]) - np.mean(prec[base])), 4),
     }
+    if has_p:
+        out["effect_of_team_pressure"] = coef("pressure_z")
+        out["effect_of_pressure_x_lean"] = coef("p_inter")
+        out["improvement_spearman_M3"] = round(oos["M3 +team pressure"] - oos[base], 4)
+        out["improvement_spearman_M4"] = round(oos["M4 everything"] - oos[base], 4)
+    return out
+
+
+# ----------------------------------------------------------------------------- pocket
+
+def _mix(d: pd.DataFrame) -> dict:
+    n = max(1, int(d["n"].sum()))
+    by = d.groupby("outcome")["n"].sum()
+    return {"dropbacks": int(d["n"].sum()),
+            "epa_per_dropback": round(float(d["epa"].sum()) / n, 3),
+            **{o: round(100 * float(by.get(o, 0)) / n, 1) for o in OUTCOMES}}
+
+
+SACKS_TAGGED_FROM = 2023
+
+
+def pocket_outcomes(seasons=None, team: str | None = None, side: str = "offense") -> dict:
+    """How dropbacks end, by coverage and pocket state (and time to throw), league-wide or for
+    one team's offense (the QB + line) or defense.
+
+    `pressured` is nflverse's was_pressure flag. Outcomes partition every tagged dropback:
+    sack, scramble, interception, incomplete, marginal catch (<=3 yards) and good catch."""
+    seasons = _default_seasons(seasons)
+    d = _raw(seasons)["dropbacks"]
+    d = d[d["season"].isin(seasons)]
+    if team:
+        team = sources._TEAM_CODE_FIX.get(team.upper(), team.upper())
+        d = d[d["posteam" if side == "offense" else "defteam"] == team]
+    out = {"seasons": seasons, "team": team, "side": side if team else None,
+           **({"warning": f"sack plays carry no coverage tag before {SACKS_TAGGED_FROM}, so windows that include "
+                          "earlier seasons understate what pressure costs; use 2023+ for pocket outcomes."}
+              if min(seasons) < SACKS_TAGGED_FROM else {}),
+           "by_pocket": {k: _mix(g) for k, g in d.groupby("pocket")},
+           "by_time_to_throw": {k: _mix(g) for k, g in d.groupby("ttt") if k != "unknown"},
+           "by_coverage": {}}
+    for c in COV_ORDER:
+        g = d[d["cov"] == c]
+        if g.empty:
+            continue
+        pr = g[g["pocket"] == "pressured"]["n"].sum() / max(1, g["n"].sum())
+        out["by_coverage"][c] = {
+            "pressure_rate_pct": round(100 * float(pr), 1),
+            "avg_pass_rushers": round(float(g["rushers_sum"].sum()) / max(1, g["rushers_n"].sum()), 2),
+            "median_free_time_to_throw": round(float(g["ttt_sum"].sum()) / max(1, g["ttt_n"].sum()), 2),
+            "clean": _mix(g[g["pocket"] == "clean"]), "pressured": _mix(g[g["pocket"] == "pressured"])}
+    return out
+
+
+def team_protection(seasons=None) -> pd.DataFrame:
+    """Per offense (QB + line): pressure rate allowed, sack rate, how far EPA falls when pressured,
+    and average time to throw. Pressure is a joint QB / line / scheme outcome, not a pure line grade.
+
+    `pressure_rate_ex_sack` drops sack plays from numerator and denominator. Sacks are missing from the
+    coverage-tagged plays before 2023, so only the ex-sack rate is comparable across all seasons."""
+    seasons = _default_seasons(seasons)
+    d = _raw(seasons)["dropbacks"]
+    d = d[d["season"].isin(seasons)]
+    rows = []
+    for team, g in d.groupby("posteam"):
+        n = g["n"].sum()
+        pr, cl = g[g["pocket"] == "pressured"], g[g["pocket"] == "clean"]
+        ns = g[g["outcome"] != "sack"]
+        rows.append({"team": team, "dropbacks": int(n),
+                     "pressure_rate": round(100 * float(pr["n"].sum()) / n, 1),
+                     "pressure_rate_ex_sack": round(100 * float(ns.loc[ns["pocket"] == "pressured", "n"].sum())
+                                                    / max(1, ns["n"].sum()), 1),
+                     "sack_rate": round(100 * float(g.loc[g["outcome"] == "sack", "n"].sum()) / n, 1),
+                     "epa_clean": round(float(cl["epa"].sum()) / max(1, cl["n"].sum()), 3),
+                     "epa_pressured": round(float(pr["epa"].sum()) / max(1, pr["n"].sum()), 3),
+                     "avg_time_to_throw": round(float(g["ttt_sum"].sum()) / max(1, g["ttt_n"].sum()), 2)})
+    return pd.DataFrame(rows).sort_values("pressure_rate").reset_index(drop=True)
