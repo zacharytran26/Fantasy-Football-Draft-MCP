@@ -206,3 +206,31 @@ class TestPressureRebound:
     def test_mean_reversion_stat_is_reported(self):
         out = cv.summarize_pressure_rebound(self._frame(rebound=0.0), n_boot=50)
         assert set(out["team_mean_reversion"]) == {"corr_prior_pressure_vs_change", "corr_prior_vs_same_pressure"}
+
+
+class TestPressureUsage:
+    def _frame(self, effect, n_teams=32, per_team=4, seed=9):
+        rng = np.random.default_rng(seed)
+        rows = []
+        for season in (2023, 2024, 2025):
+            for i in range(n_teams):
+                pct = (i + 1) / n_teams
+                for _ in range(per_team):
+                    prior = rng.normal(5, 1.5)
+                    rows.append(dict(season=season, team=f"T{i}", position="TE", tgt_g_p=prior, yds_g_p=prior * 8,
+                                     prior_pct=pct, press_share_p=rng.uniform(0.1, 0.4), short_share_p=rng.uniform(0.1, 0.5),
+                                     tgt_g=prior + effect * (pct - 0.5) * 2 + rng.normal(0, 0.8),
+                                     yds_g=prior * 8 + rng.normal(0, 8)))
+        return pd.DataFrame(rows)
+
+    def test_planted_regression_in_te_volume_is_detected(self):
+        r = cv.summarize_pressure_usage(self._frame(effect=-1.0), "TE", n_boot=200)
+        e = r["outcomes"]["tgt_g"]["team_pressure_allowed_prior"]
+        assert e["effect_per_sd"] < -0.2 and e["excludes_zero"] and e["oos_mse_change_pct"] < 0
+
+    def test_noise_is_not_reported_as_an_effect(self):
+        r = cv.summarize_pressure_usage(self._frame(effect=0.0), "TE", n_boot=200)
+        assert not r["outcomes"]["tgt_g"]["team_pressure_allowed_prior"]["excludes_zero"]
+
+    def test_too_few_rows_say_so(self):
+        assert "error" in cv.summarize_pressure_usage(self._frame(0.0, n_teams=2, per_team=2), "TE", n_boot=10)
