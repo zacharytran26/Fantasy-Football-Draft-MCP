@@ -603,7 +603,7 @@ def pressure_rebound_frame(seasons, sc=None, min_games: int = 6) -> pd.DataFrame
         frames.append(m)
     h = pd.concat(frames, ignore_index=True).dropna(subset=["prior_pct"])
     h["resid"] = np.nan
-    for pos, g in h.groupby("position"):
+    for _pos, g in h.groupby("position"):  # one regression per position, so residuals are position-fair
         b = _ols(g[["prior_ppg"]].to_numpy(), g["ppg"].to_numpy())
         h.loc[g.index, "resid"] = g["ppg"] - _predict(b, g[["prior_ppg"]].to_numpy())
     return h
