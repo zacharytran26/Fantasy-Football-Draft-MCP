@@ -9,8 +9,8 @@ Source: dynastyprocess/data, which mirrors FantasyPros ECR history.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -782,7 +782,7 @@ def position_scarcity_entropy_backtest(seasons: list[int], league=None, weights=
 
                 implied_cost = max(0.0, value_now - expected_map.get(pos, 0.0))
                 cost = max(0.0, value_now - value_future)
-                frac = (lambda x: x / value_now) if value_now > 0 else (lambda x: 0.0)
+                frac = (lambda x, v=value_now: x / v) if value_now > 0 else (lambda x: 0.0)
 
                 rows.append({
                     "season": season, "pick_idx": current_pick, "position": pos,
@@ -2485,7 +2485,7 @@ def mock_draft(league, weights, season: int, n_trials: int = 30,
             else:
                 r = rosters[slot]
                 avail = pool[pool["position"].map(
-                    lambda p: r.get(p, 0) < _MOCK_BOT_CAPS.get(p, 99))]
+                    lambda p, r=r: r.get(p, 0) < _MOCK_BOT_CAPS.get(p, 99))]
                 if avail.empty:
                     avail = pool
                 sigma = np.maximum(3.0, 0.25 * avail["adp"].to_numpy())
@@ -2645,7 +2645,9 @@ def champion_strategies(league_id: str, seasons: list[int]) -> dict:
     data but no value verdicts or steal context. ESPN only.
     """
     import os
+
     import requests
+
     from . import board as bd
     from . import sources
     from .board import norm_name
