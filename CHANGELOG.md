@@ -20,20 +20,17 @@ All notable changes to this project. Format follows
 - Exposure is snaps on the field, not routes run, so `tpps` understates TPRR; comparisons
   are against the player's position baseline. Roles in `coverage_roles` are target-rank
   stand-ins (X=WR1, Z=WR2, Slot=WR3, Y=TE1), not alignment.
-- Surfaced inside the draft flow, not just as separate tools: each WR/TE/RB recommendation
-  in `who_should_i_pick` carries a compact man-vs-zone `coverage` read (against the position
-  average, with a `lean`), `on_the_clock` appends the full `coverage_report` for the top
-  pick, `best_available` and `compare_players` gain `man_yps`/`zone_yps` columns, and
-  `prewarm` builds the coverage data so nothing downloads on the clock. A coverage failure
-  never breaks a recommendation.
+- Available on request, not in the recommendation output: `prewarm` builds the coverage data
+  so `coverage_report` / `player_report` answer instantly, but `who_should_i_pick`,
+  `on_the_clock`, `best_available` and `compare_players` do not show it (see the backtest
+  below).
 - New `coverage_value_backtest` (repo-style, prior-season inputs only, out-of-sample): adding
   a player's man-minus-zone gap, alone or interacted with how man-heavy his schedule is, to his
   prior points per game does NOT improve next-season prediction for WR, TE or RB (effects
   straddle zero; out-of-sample Spearman unchanged or slightly worse). Schedule man-exposure
   varies only ~2 points across teams, so it cannot move RB/WR target share (+0.15 pts of
-  share per SD, CI [-0.5, +0.7]). The draft-flow coverage block therefore carries numbers
-  only: the earlier "better vs man / better vs zone" verdict was removed as it implied a signal
-  that isn't there. The source's coverage tags also drift between seasons (league man share
+  share per SD, CI [-0.5, +0.7]). Coverage was therefore taken out of the recommendation
+  output entirely and kept as on-request context. The source's coverage tags also drift between seasons (league man share
   30/29/44/50/31% for 2021-2025); noted in the docs.
 - **Informational only, not in `draft_score`.** `coverage_split_backtest` finds a player's
   man-minus-zone gap barely repeats season to season (WR rank correlation roughly 0.0-0.25
