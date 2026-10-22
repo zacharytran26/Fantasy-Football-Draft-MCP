@@ -101,3 +101,30 @@ class TestPersistence:
         monkeypatch.setattr(cv, "_positions", lambda: pd.DataFrame({"player_id": [f"p{i}" for i in range(12)], "position": "WR"}))
         r = cv.split_persistence("WR", [2024, 2025], min_snaps=100)
         assert r["year_to_year_gap_persistence"]["tpps"][0]["spearman"] == pytest.approx(1.0)
+
+
+class TestDraftFlowSummary:
+    """The inline coverage read shown inside who_should_i_pick / best_available."""
+
+    def _ctx(self, man_yps, zone_yps):
+        row = {"position": "WR", "man_yps": man_yps, "zone_yps": zone_yps, "man_tpps": 25.0, "zone_tpps": 24.0,
+               "man_catch": 60.0, "zone_catch": 70.0, "man_snaps": 300.0, "zone_snaps": 400.0}
+        base = {"WR": {"man": {"yps": 1.5}, "zone": {"yps": 1.4}}}
+        return {"by_id": {"p1": row}, "base": base}
+
+    def test_lean_needs_a_real_gap(self):
+        from ffdraft.server import _coverage_summary
+        assert _coverage_summary("p1", self._ctx(2.5, 2.0))["lean"] == "better vs man"
+        assert _coverage_summary("p1", self._ctx(1.8, 2.3))["lean"] == "better vs zone"
+        assert _coverage_summary("p1", self._ctx(2.0, 1.9))["lean"] == "no real lean"
+
+    def test_reports_both_sides_against_the_position_average(self):
+        from ffdraft.server import _coverage_summary
+        s = _coverage_summary("p1", self._ctx(2.5, 2.0))
+        assert s["vs_man"]["yds_per_snap"] == 2.5 and s["vs_zone"]["snaps"] == 400
+        assert s["position_avg_yds_per_snap"] == {"man": 1.5, "zone": 1.4}
+
+    def test_missing_player_or_failed_load_is_none_not_an_error(self):
+        from ffdraft.server import _coverage_summary
+        assert _coverage_summary("zzz", self._ctx(2, 2)) is None
+        assert _coverage_summary("p1", None) is None

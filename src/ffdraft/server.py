@@ -302,7 +302,16 @@ def best_available(position: str | None = None, limit: int = 15,
     avail = avail.sort_values(key, ascending=False)
     cols = ["name", "position", "team", "overall_rank", "pos_rank", "adp", "adp_delta",
             "proj_points", "adj_ppg", "consistency", "startable_rate", "injury_risk", "vor"]
-    return json.dumps({"sorted_by": key, "players": _rows(avail, cols, limit)}, indent=2)
+    shown = avail.head(limit).copy()
+    cctx = _coverage_ctx()
+    if cctx:  # man/zone yards per snap at a glance; NaN for QBs and players without tagged snaps
+        for mz in ("man", "zone"):
+            shown[f"{mz}_yps"] = shown["player_id"].map(lambda i, mz=mz: (cctx["by_id"].get(i) or {}).get(f"{mz}_yps"))
+        cols += ["man_yps", "zone_yps"]
+    return json.dumps({"sorted_by": key, "players": _rows(shown, cols, limit),
+                       **({"coverage_note": "man_yps/zone_yps = yards per pass snap against man/zone coverage "
+                                            "(2023-2025). Context only; compare within a position."} if cctx else {})},
+                      indent=2)
 
 
 @mcp.tool()
@@ -336,15 +345,20 @@ def who_should_i_pick(limit: int = 6) -> str:
     alternatives = model.likely_alternative_by_position(avail, current, after)
 
     picks = []
+    cctx = _coverage_ctx()
     for _, r in recs.iterrows():
-        picks.append({
+        pick = {
             "player": r["name"], "position": r["position"], "team": r.get("team"),
             "adp": round(float(r["adp"]), 1),
             "proj_points": round(float(r["proj_points"]), 1),
             "consistency": round(float(r["consistency"]), 3),
             "survives_to_next_pick": round(float(r["p_available_next"]), 2),
             "why": model.explain(r),
-        })
+        }
+        cov = _coverage_summary(r.get("player_id"), cctx) if r["position"] in cov_mod.SKILL else None
+        if cov:
+            pick["coverage"] = cov
+        picks.append(pick)
     return json.dumps({
         "evaluating_pick": current,
         "round": (current - 1) // league.teams + 1,
@@ -354,6 +368,7 @@ def who_should_i_pick(limit: int = 6) -> str:
         "recommendations": picks,
         "if_you_wait_you_would_probably_still_get": alternatives,
         "headline": (f"Take {picks[0]['player']} — {picks[0]['why']}" if picks else "Board empty"),
+        **({"coverage_note": _COVERAGE_FLOW_NOTE} if any("coverage" in p for p in picks) else {}),
     }, indent=2)
 
 
@@ -733,6 +748,8 @@ def on_the_clock(platform: str, league_id: str | None = None, draft_id: str | No
     4. value_picks — market-value context, scoped to this round and next.
     5. separation_report — only when the top recommendation is a WR or TE, that
        player's route efficiency and schedule context.
+    6. coverage_report — only when the top recommendation is a WR, TE or RB, that
+       player's man-vs-zone splits (and rookie snap alignment if built).
 
     Use this instead of calling each tool separately when you're on the clock and
     want the full picture in one shot. platform/league_id/draft_id/pasted_board/season
@@ -767,6 +784,10 @@ def on_the_clock(platform: str, league_id: str | None = None, draft_id: str | No
     if picks and picks[0].get("position") in ("WR", "TE"):
         result["separation_report"] = json.loads(
             separation_report(position=picks[0]["position"], player_name=picks[0]["player"]))
+
+    if picks and picks[0].get("position") in cov_mod.SKILL:
+        result["coverage_report"] = json.loads(
+            coverage_report(position=picks[0]["position"], player_name=picks[0]["player"]))
 
     return json.dumps(result, indent=2)
 
@@ -1783,6 +1804,7 @@ def prewarm(verbose: bool = True) -> str:
         ("board", lambda: _build_board()),
         ("oline", lambda: features.oline_ratings()),
         ("pace", lambda: features.team_pace_and_split()),
+        ("coverage", lambda: cov_mod.player_splits(list(range(CURRENT_SEASON - 3, CURRENT_SEASON)))),
     ]
     for name, fn in steps:
         s = _time.time()
@@ -1804,6 +1826,52 @@ def prewarm(verbose: bool = True) -> str:
         out["step_seconds"] = timings
         out["disk_cache"] = sources.cache_status()
     return json.dumps(out, indent=2, default=str)
+
+
+def _coverage_ctx() -> dict | None:
+    """Man/zone splits indexed by player_id, plus position baselines, for annotating
+    draft-flow output. Returns None on any failure: coverage decorates the draft tools,
+    so a data hiccup must never break a pick recommendation."""
+    try:
+        seasons = list(range(CURRENT_SEASON - 3, CURRENT_SEASON))
+        sp = cov_mod.player_splits(seasons)
+        return {"by_id": sp.set_index("player_id").to_dict("index"),
+                "base": cov_mod.position_baselines(seasons)}
+    except Exception:
+        return None
+
+
+def _coverage_summary(player_id, ctx: dict | None) -> dict | None:
+    """One compact man-vs-zone read for a player, shown inline in the draft flow.
+    Informational: it is a tiebreaker, not part of draft_score (see coverage_split_backtest)."""
+    if not ctx:
+        return None
+    x = ctx["by_id"].get(player_id)
+    if x is None:
+        return None
+    base = ctx["base"].get(x["position"], {})
+
+    def side(mz):
+        return {"yds_per_snap": x[f"{mz}_yps"], "target_rate_pct": x[f"{mz}_tpps"], "catch_pct": x[f"{mz}_catch"],
+                "snaps": int(x[f"{mz}_snaps"])}
+
+    gap = x["man_yps"] - x["zone_yps"]
+    out = {"vs_man": side("man"), "vs_zone": side("zone"),
+           "position_avg_yds_per_snap": {"man": base.get("man", {}).get("yps"), "zone": base.get("zone", {}).get("yps")},
+           "lean": "better vs man" if gap >= 0.3 else "better vs zone" if gap <= -0.3 else "no real lean"}
+    al = align_mod.profile(player_id)
+    if al:
+        role = al["primary_role"]
+        d = al["roles"].get(role, {})
+        out["alignment"] = {"primary_role": role, "route_share_pct": d.get("route_share_pct"),
+                            "tprr_vs_man": (d.get("vs_man") or {}).get("tprr"),
+                            "tprr_vs_zone": (d.get("vs_zone") or {}).get("tprr")}
+    return out
+
+
+_COVERAGE_FLOW_NOTE = ("Coverage lines are context, not part of the score: a player's man-vs-zone gap barely "
+                       "repeats year to year (coverage_split_backtest), so use it to break ties. Target rate is per "
+                       "pass snap on the field; compare against the position average.")
 
 
 def _coverage_snapshot(r: pd.Series) -> dict | None:
@@ -1903,6 +1971,11 @@ def compare_players(names: str) -> str:
         df = pd.DataFrame(rows)
         cols = ["name", "position", "team", "adp", "proj_points", "adj_ppg", "consistency",
                 "startable_rate", "spike_rate", "injury_risk", "exp_games", "vor", "draft_score"]
+        cctx = _coverage_ctx()
+        if cctx:
+            for mz in ("man", "zone"):
+                df[f"{mz}_yps"] = df["player_id"].map(lambda i, mz=mz: (cctx["by_id"].get(i) or {}).get(f"{mz}_yps"))
+            cols += ["man_yps", "zone_yps"]
         best = df.sort_values("draft_score", ascending=False).iloc[0]
         out["players"] = _rows(df.sort_values("draft_score", ascending=False), cols, 4)
         out["verdict"] = f"{best['name']} — {model.explain(best)}"

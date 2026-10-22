@@ -20,6 +20,12 @@ All notable changes to this project. Format follows
 - Exposure is snaps on the field, not routes run, so `tpps` understates TPRR; comparisons
   are against the player's position baseline. Roles in `coverage_roles` are target-rank
   stand-ins (X=WR1, Z=WR2, Slot=WR3, Y=TE1), not alignment.
+- Surfaced inside the draft flow, not just as separate tools: each WR/TE/RB recommendation
+  in `who_should_i_pick` carries a compact man-vs-zone `coverage` read (against the position
+  average, with a `lean`), `on_the_clock` appends the full `coverage_report` for the top
+  pick, `best_available` and `compare_players` gain `man_yps`/`zone_yps` columns, and
+  `prewarm` builds the coverage data so nothing downloads on the clock. A coverage failure
+  never breaks a recommendation.
 - **Informational only, not in `draft_score`.** `coverage_split_backtest` finds a player's
   man-minus-zone gap barely repeats season to season (WR rank correlation roughly 0.0-0.25
   on 45-58 players per season pair), so it fails the same bar `matchup_z` did. The stable

@@ -140,6 +140,11 @@ snap on the field (blocking snaps count), so compare within a position.
 **Informational, not in `draft_score`.** A player's man-minus-zone gap barely repeats year to
 year -- run `coverage_split_backtest` to see it.
 
+Coverage also appears **automatically in the draft flow**: `who_should_i_pick` adds a `coverage`
+block (man vs zone yards/snap, target rate, catch % against the position average, plus a `lean`)
+to every WR/TE/RB recommendation, `on_the_clock` appends the full report for the top pick,
+and `best_available` / `compare_players` show `man_yps` / `zone_yps` columns. `prewarm` builds the data.
+
 ### `coverage_roles`
 Target share by role against each coverage. X = a team's most-targeted WR, Z = second,
 Slot = third, Y = most-targeted TE, RB = any back -- target-rank stand-ins, not alignment.
