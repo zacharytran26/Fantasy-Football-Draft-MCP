@@ -234,3 +234,35 @@ class TestPressureUsage:
 
     def test_too_few_rows_say_so(self):
         assert "error" in cv.summarize_pressure_usage(self._frame(0.0, n_teams=2, per_team=2), "TE", n_boot=10)
+
+
+class TestPressureNote:
+    def _ctx(self, pct):
+        teams = [f"T{i}" for i in range(32)]
+        rate = pd.Series(np.linspace(20, 35, 32), index=teams)
+        return {"prior": 2025, "pct": rate.rank(pct=True), "rank_worst": rate.rank(ascending=False, method="min"), "rate": rate,
+                "prev_team": pd.Series({"te1": f"T{pct}"}), "exposure": pd.DataFrame({"press_share": [0.31]}, index=["te1"])}
+
+    def _row(self, team="T31", pos="TE"):
+        return pd.Series({"position": pos, "team": team, "player_id": "te1"})
+
+    def test_worst_protection_te_gets_a_negative_regression_note(self):
+        from ffdraft.server import _pressure_usage_note
+        n = _pressure_usage_note(self._row("T31"), self._ctx(31))
+        assert n["typical_target_change_per_game"] < -0.4 and "regression" in n["signal"]
+        assert n["own_share_of_targets_under_pressure_pct"] == 31.0
+
+    def test_best_protection_te_gets_a_positive_note(self):
+        from ffdraft.server import _pressure_usage_note
+        assert _pressure_usage_note(self._row("T0"), self._ctx(0))["typical_target_change_per_game"] > 0.4
+
+    def test_middle_of_the_pack_and_other_positions_get_nothing(self):
+        from ffdraft.server import _pressure_usage_note
+        assert _pressure_usage_note(self._row("T15"), self._ctx(15)) is None
+        assert _pressure_usage_note(self._row("T31", pos="WR"), self._ctx(31)) is None
+        assert _pressure_usage_note(self._row("T31", pos="RB"), self._ctx(31)) is None
+
+    def test_a_te_who_changed_teams_or_a_missing_context_gets_nothing(self):
+        from ffdraft.server import _pressure_usage_note
+        assert _pressure_usage_note(self._row("T31"), self._ctx(5)) is None     # prior team differs
+        assert _pressure_usage_note(self._row("T31"), None) is None

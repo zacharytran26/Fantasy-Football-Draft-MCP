@@ -34,6 +34,10 @@ All notable changes to this project. Format follows
   top. The value backtest now also tests the QB/protection side (prior-season team pressure rate, and
   its interaction with the man/zone gap): no improvement for WR, TE or RB. Sacks have no coverage tag
   before 2023, so pocket tables warn on earlier windows and the team pressure feature uses the ex-sack rate.
+- `who_should_i_pick` shows a `pressure_note` on a TE recommendation when his team was in the worst (or
+  best) quartile for pressure allowed last season and he stayed on it: his volume is likely pressure-inflated
+  and tends to regress. Informational only (no change to score or rank), TE only, because that is the one
+  position where the volume effect held up.
 - New `pressure_usage_backtest`, answering "RBs and TEs live on dump-offs while WRs carry chunk plays":
   tests volume (targets and receiving yards per game) instead of points, because pressure shifts targets
   toward checkdowns and a points total can hide opposite effects. At the play level, 74% of clean-pocket RB
