@@ -12,8 +12,9 @@ manual charting. But most of what it measures is recoverable from open data:
     are estimated as snap share times team dropbacks, which tracks true route counts
     closely for perimeter receivers.
 
-What genuinely cannot be reproduced is the man-versus-zone split: that requires
-per-play coverage classification, which only manual charting provides.
+The man-versus-zone split *can* be recovered, from nflverse per-play coverage tags
+rather than manual charting -- see `coverage.py`. Those tags come from NGS tracking, cover
+roughly half of dropbacks, and measure exposure as snaps on the field instead of routes.
 """
 from __future__ import annotations
 

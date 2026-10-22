@@ -328,6 +328,12 @@ environment multiplier (`m_oline`, `m_volume`, `m_schedule`, `m_divisional`,
 Head to head, 2-4 players, comma-separated string. Returns each player's full
 comparison row plus a one-line verdict for who grades highest.
 
+**`coverage_report(position="WR", coverage="man", sort_by="yps", min_snaps=150, limit=15, player_name=None, available_only=False, window=3)`**
+Man vs zone splits for any WR/TE/RB, veterans included. Informational — a player's gap
+barely repeats year to year, so it isn't in `draft_score`. Companions: `coverage_roles(team=None)`,
+`alignment_report(role, coverage, ...)` (2023-2025 rookies; needs `scripts/build_alignment.py`),
+and `coverage_split_backtest(position)`. Details in [tools.md](tools.md).
+
 **`rookie_report(limit=20, position=None)`**
 This year's incoming class, projected from NFL draft capital and landing spot
 (pace/O-line of the team they landed on) rather than history, since they have
