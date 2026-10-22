@@ -152,6 +152,20 @@ game at predicting next season's output? Effects in points per game per SD with
 player-clustered bootstrap CIs, plus out-of-sample Spearman and top-N precision. Over
 2023-2025 it does not for WR, TE or RB, which is why coverage stays context only.
 
+### `pocket_report`
+How dropbacks end by coverage, pocket state and time to throw: the QB / protection side. A sped-up
+QB turns routes into sacks, incompletions, interceptions and marginal checkdowns. League-wide for
+2023-2025, a pressured dropback averages about -0.44 EPA vs +0.24 clean (good catches ~57% -> ~28%,
+~22% end in a sack); Cover 0 pressures the QB on ~40% of dropbacks with ~5.4 rushers and ~2.3s to
+throw, vs 27-29% for zone looks; throws held past ~3.2s are the least efficient. Pass `team` for
+that team's offense (or `side="defense"`); the response also lists every team's pressure rate
+allowed, sack rate and time to throw. Context only: a team's pressure rate is only weakly repeatable
+year to year and did not improve next-season player prediction. Sacks carry no coverage tag before
+2023, so keep `window` at 3 or fewer.
+
+`coverage_report`, `coverage_roles` and both backtests also accept `pocket` (`all`, `clean`,
+`pressured`) to separate coverage from pressure.
+
 ### `coverage_roles`
 Target share by role against each coverage. X = a team's most-targeted WR, Z = second,
 Slot = third, Y = most-targeted TE, RB = any back -- target-rank stand-ins, not alignment.

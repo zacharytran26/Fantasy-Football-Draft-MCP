@@ -538,14 +538,15 @@ _COVERAGE_COLS = ["name", "position", "team", "overall_rank", "adp", "man_snaps"
 
 _COVERAGE_WARNING = (
     "Context only. A player's man-minus-zone gap barely repeats year to year (coverage_split_backtest), and adding it to "
-    "his prior points per game did not improve next-season prediction for WR, TE or RB, alone or interacted with how "
-    "man-heavy his schedule is (coverage_value_backtest). Not part of draft_score.")
+    "his prior points per game did not improve next-season prediction for WR, TE or RB, alone, interacted with how "
+    "man-heavy his schedule is, or controlling for the pocket and his team's pressure rate (coverage_value_backtest). "
+    "Pocket state is the larger effect on any single play (pocket_report). Not part of draft_score.")
 
 
 @mcp.tool()
 def coverage_report(position: str = "WR", coverage: str = "man", sort_by: str = "yps",
                     min_snaps: int = 150, limit: int = 15, player_name: str | None = None,
-                    available_only: bool = False, window: int = 3) -> str:
+                    available_only: bool = False, window: int = 3, pocket: str = "all") -> str:
     """How WR / TE / RB production splits against man versus zone coverage.
 
     Built from nflverse per-play coverage tags (Cover 0/1/2/3/4/6, 2-Man; ~half of
@@ -562,13 +563,20 @@ def coverage_report(position: str = "WR", coverage: str = "man", sort_by: str = 
     `coverage` ("man" or "zone") sorted by sort_by (yps, epa_t, ypt, tpps, catch);
     `available_only` hides players already drafted in the current draft.
 
+    `pocket` ("all", "clean", "pressured") restricts the splits to dropbacks where the QB did
+    or did not face pressure. Pressure is the bigger driver of how a route pays off (a
+    pressured dropback averages about -0.29 EPA vs +0.22 clean), so "clean" shows how a
+    receiver does against a coverage when the QB had time. Lower `min_snaps` for "pressured".
+
     Informational only: individual man-vs-zone gaps are mostly noise year to year, so
     this is not blended into draft_score. See coverage_split_backtest.
     """
     seasons = list(range(CURRENT_SEASON - window, CURRENT_SEASON))
+    if pocket not in cov_mod.POCKETS:
+        return json.dumps({"error": f"pocket must be one of {list(cov_mod.POCKETS)}"})
     try:
-        sp = cov_mod.player_splits(seasons)
-        base = cov_mod.position_baselines(seasons)
+        sp = cov_mod.player_splits(seasons, pocket=pocket)
+        base = cov_mod.position_baselines(seasons, pocket=pocket)
     except Exception as exc:  # network / unpublished season
         return json.dumps({"error": f"coverage data unavailable: {type(exc).__name__}: {exc}"})
     b = _mark_drafted(_build_board(), _state())
@@ -582,7 +590,7 @@ def coverage_report(position: str = "WR", coverage: str = "man", sort_by: str = 
             return json.dumps({"error": f"no coverage split for '{player_name}' (needs WR/TE/RB with "
                                         f"tagged snaps against both man and zone in {seasons})"})
         r = r.iloc[0]
-        out = {"player": r["name"], "position": r["position"], "seasons": seasons,
+        out = {"player": r["name"], "position": r["position"], "seasons": seasons, "pocket": pocket,
                "splits": _rows(pd.DataFrame([r]), _COVERAGE_COLS, 1)[0],
                "position_baseline": base.get(r["position"]),
                "warning": _COVERAGE_WARNING}
@@ -600,14 +608,14 @@ def coverage_report(position: str = "WR", coverage: str = "man", sort_by: str = 
     if available_only:
         d = d[d["drafted"] == False]  # noqa: E712 -- NaN (not on board) is excluded too
     d = d.sort_values(key, ascending=False)
-    return json.dumps({"position": pos, "coverage": cov, "seasons": seasons, "ranked_by": key,
+    return json.dumps({"position": pos, "coverage": cov, "pocket": pocket, "seasons": seasons, "ranked_by": key,
                        "position_baseline": base.get(pos, {}).get(cov), "qualifying_players": int(len(d)),
                        "warning": _COVERAGE_WARNING,
                        "players": _rows(d, _COVERAGE_COLS, limit)}, indent=2, default=str)
 
 
 @mcp.tool()
-def coverage_roles(team: str | None = None, window: int = 3) -> str:
+def coverage_roles(team: str | None = None, window: int = 3, pocket: str = "all") -> str:
     """Which receivers each coverage feeds, league-wide or for one team.
 
     Targets are split by ROLE against each coverage: X = a team's most-targeted WR that
@@ -622,10 +630,16 @@ def coverage_roles(team: str | None = None, window: int = 3) -> str:
     With `team`, also returns the coverage mix that team's defense runs and how that
     offense's targets split by role against each coverage -- single-team splits are
     small samples, so lean on the multi-season view.
+
+    `pocket` ("all", "clean", "pressured") separates coverage from pressure. The coverage
+    pattern holds in clean pockets (Cover 2: ~23% of targets to RBs vs ~12% in Cover 1), and
+    pressure adds a further 3-5 points to the RB share in every coverage as the QB checks down.
     """
     seasons = list(range(CURRENT_SEASON - window, CURRENT_SEASON))
+    if pocket not in cov_mod.POCKETS:
+        return json.dumps({"error": f"pocket must be one of {list(cov_mod.POCKETS)}"})
     try:
-        out = {"seasons": seasons, "league": cov_mod.role_table(seasons)}
+        out = {"seasons": seasons, "league": cov_mod.role_table(seasons, pocket=pocket)}
         if team:
             out["team"] = cov_mod.team_profile(team, seasons)
     except Exception as exc:
@@ -671,7 +685,8 @@ def alignment_report(role: str = "Slot", coverage: str = "MAN", sort_by: str = "
 
 
 @mcp.tool()
-def coverage_split_backtest(position: str = "WR", min_snaps: int = 120, window: int = 4) -> str:
+def coverage_split_backtest(position: str = "WR", min_snaps: int = 120, window: int = 4,
+                            pocket: str = "all") -> str:
     """Does a player's man-minus-zone gap repeat? Year-to-year rank correlation of each
     metric's gap, among players with `min_snaps` against both coverages in both seasons.
 
@@ -681,21 +696,24 @@ def coverage_split_backtest(position: str = "WR", min_snaps: int = 120, window: 
     """
     seasons = list(range(CURRENT_SEASON - window, CURRENT_SEASON))
     try:
-        return json.dumps(cov_mod.split_persistence(position, seasons, min_snaps), indent=2)
+        return json.dumps(cov_mod.split_persistence(position, seasons, min_snaps, pocket=pocket), indent=2)
     except Exception as exc:
         return json.dumps({"error": f"coverage data unavailable: {type(exc).__name__}: {exc}"})
 
 
 @mcp.tool()
 def coverage_value_backtest(seasons: str = "2023,2024,2025", position: str = "WR", top_n: int | None = None,
-                            prior_window: int = 3) -> str:
+                            prior_window: int = 3, pocket: str = "all") -> str:
     """Backtest: does man-vs-zone information improve on a player's own prior production?
 
     Leakage-free, in the style of matchup_backtest. For each season, talent is the
     player's points per game the year before; coverage features come only from the
     `prior_window` seasons before it (man vs zone yards per snap and their gap,
     `lean`); `sched_man_z` is how man-heavy his team's schedule is, from opponents'
-    PRIOR-season coverage. Target: points per game that season (6+ games).
+    PRIOR-season coverage. Target: points per game that season (6+ games). Also tests the
+    QB-and-protection side: `pressure_z`, how often the player's team gave up pressure the
+    prior season, alone and interacted with the man/zone gap. `pocket="clean"` builds the
+    man/zone gap from clean-pocket dropbacks only. Neither helps for WR, TE or RB.
 
     Returns (1) the effect of lean and of schedule-x-lean in fantasy points per game per
     SD with player-clustered bootstrap CIs, and (2) out-of-sample Spearman and top-N
@@ -711,7 +729,7 @@ def coverage_value_backtest(seasons: str = "2023,2024,2025", position: str = "WR
     pos = position.upper()
     n = top_n or {"WR": 24, "RB": 24, "TE": 12}.get(pos, 24)
     try:
-        h = cov_mod.coverage_value_backtest(yrs, pos, prior_window=prior_window)
+        h = cov_mod.coverage_value_backtest(yrs, pos, prior_window=prior_window, pocket=pocket)
         if h.empty:
             return json.dumps({"error": "no backtest data for those seasons"})
         out = cov_mod.summarize_value_backtest(h, top_n=n)
@@ -722,6 +740,41 @@ def coverage_value_backtest(seasons: str = "2023,2024,2025", position: str = "WR
                              "ppg using prior_ppg alone (M0) vs adding coverage (M1, M2). excludes_zero=false and "
                              "non-positive improvements mean coverage adds nothing detectable.")
     return json.dumps(out, indent=2)
+
+
+@mcp.tool()
+def pocket_report(team: str | None = None, side: str = "offense", window: int = 3) -> str:
+    """How dropbacks end by coverage, pocket state and time to throw -- the QB / protection side.
+
+    A sped-up QB turns routes into sacks, incompletions, interceptions and marginal checkdowns,
+    so coverage results have to be read against the pocket. League-wide, 2023-2025: a pressured
+    dropback averages about -0.44 EPA vs +0.24 clean; good catches fall from ~57% to ~28%,
+    incompletions rise from ~27% to ~35%, ~22% end in a sack and scrambles nearly double.
+    Cover 0 pressures the QB on ~40% of dropbacks (5.4 rushers, ~2.3s to throw) vs 27-29% for
+    the zone looks; throws held past ~3.2s are the least efficient of all (+0.07 EPA, 47% incomplete).
+    Sacks carry no coverage tag before 2023, so use 2023+ windows (the default).
+
+    Returns, per pocket / time-to-throw bucket / coverage, the outcome mix (sack, scramble,
+    interception, incomplete, marginal catch of 3 yards or less, good catch) and EPA per dropback.
+    With `team`, restricts to that team's offense (QB + line) or, with side="defense", its
+    defense. Also returns every team's pressure rate allowed, sack rate and time to throw.
+
+    Context, not a ranking input: a team's prior-season pressure rate (a joint QB / line /
+    scheme outcome) is only moderately repeatable year to year and did not improve next-season
+    player prediction (coverage_value_backtest). Pass-block rank is already in the player model.
+    """
+    seasons = list(range(CURRENT_SEASON - window, CURRENT_SEASON))
+    if side not in ("offense", "defense"):
+        return json.dumps({"error": "side must be offense|defense"})
+    try:
+        out = cov_mod.pocket_outcomes(seasons, team=team, side=side)
+        prot = cov_mod.team_protection(seasons)
+        out["team_protection"] = _rows(prot, list(prot.columns), 40)
+        out["note"] = ("pressure is nflverse's was_pressure flag; pressure rate allowed reflects the QB, line and "
+                       "scheme together. Lower pressure_rate = better protection.")
+    except Exception as exc:
+        return json.dumps({"error": f"coverage data unavailable: {type(exc).__name__}: {exc}"})
+    return json.dumps(out, indent=2, default=str)
 
 
 @mcp.tool()

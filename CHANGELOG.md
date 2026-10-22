@@ -24,6 +24,16 @@ All notable changes to this project. Format follows
   so `coverage_report` / `player_report` answer instantly, but `who_should_i_pick`,
   `on_the_clock`, `best_available` and `compare_players` do not show it (see the backtest
   below).
+- Pocket-aware: coverage results are now split by pocket (`clean` / `pressured`, from nflverse's
+  `was_pressure`) and time to throw, because a sped-up QB turns routes into sacks, incompletions,
+  interceptions and marginal checkdowns. New `pocket_report` (outcome mix and EPA by coverage, pocket and
+  time-to-throw bucket, plus every team's pressure rate allowed, sack rate and time to throw);
+  `pocket` argument on `coverage_report`, `coverage_roles` and both backtests. 2023-2025: pressured
+  dropbacks average -0.44 EPA vs +0.24 clean, and Cover 0 pressures the QB on ~40% of dropbacks. The
+  coverage pattern survives holding the pocket clean, and pressure adds 3-5 points of RB target share on
+  top. The value backtest now also tests the QB/protection side (prior-season team pressure rate, and
+  its interaction with the man/zone gap): no improvement for WR, TE or RB. Sacks have no coverage tag
+  before 2023, so pocket tables warn on earlier windows and the team pressure feature uses the ex-sack rate.
 - New `coverage_value_backtest` (repo-style, prior-season inputs only, out-of-sample): adding
   a player's man-minus-zone gap, alone or interacted with how man-heavy his schedule is, to his
   prior points per game does NOT improve next-season prediction for WR, TE or RB (effects
